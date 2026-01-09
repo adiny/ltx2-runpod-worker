@@ -1,0 +1,11 @@
+runpod
+torch>=2.4.0
+diffusers>=0.32.0
+transformers>=4.46.0
+accelerate>=1.0.0
+sentencepiece
+soundfile
+librosa
+imageio-ffmpeg
+numpy
+huggingface_hub
