@@ -8,7 +8,7 @@ soundfile
 librosa
 imageio-ffmpeg
 huggingface_hub
-# ספריות שחובה עבור runpod ו-audio
+numpy
 pillow
 pydantic
-numpy
+protobuf
