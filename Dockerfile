@@ -15,7 +15,8 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install ninja packaging wheel
 
-RUN pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.9.post1/flash_attn-2.5.9.post1+cu122torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl --no-cache-dir
+# התקנת diffusers מ-GitHub לתמיכה ב-LTX-2
+RUN pip install git+https://github.com/huggingface/diffusers.git --no-cache-dir
 
 RUN pip install --no-cache-dir -r requirements.txt
 
