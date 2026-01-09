@@ -6,9 +6,10 @@ RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
     runpod \
-    diffusers==0.25.0 \
-    transformers==4.36.0 \
-    accelerate==0.25.0 \
+    torch==2.1.0 \
+    diffusers==0.24.0 \
+    transformers==4.35.0 \
+    accelerate==0.24.0 \
     safetensors \
     imageio \
     imageio-ffmpeg
