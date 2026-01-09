@@ -1,18 +1,18 @@
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 WORKDIR /
 
-RUN apt-get update && apt-get install -y ffmpeg git && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
     runpod \
     diffusers==0.24.0 \
     transformers==4.35.0 \
     accelerate==0.24.0 \
     safetensors \
     imageio \
-    imageio-ffmpeg \
-    sentencepiece
+    imageio-ffmpeg
 
 COPY src/handler.py /handler.py
 
