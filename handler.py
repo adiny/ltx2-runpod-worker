@@ -1,3 +1,37 @@
+VERSION = "1.0.1"
+
+import os
+import torch
+import runpod
+import subprocess
+import soundfile as sf
+import base64
+from diffusers import LTXPipeline
+
+VOLUME_PATH = "/runpod-volume/LTX-2"
+MODEL_ID = "Lightricks/LTX-2"
+
+pipe = None
+
+def download_model_if_needed():
+    print(f"🚀 Worker Version: {VERSION}")
+    if not os.path.exists(VOLUME_PATH):
+        print(f"Model not found in {VOLUME_PATH}. Downloading LTX-2...")
+        from huggingface_hub import snapshot_download
+        os.makedirs(VOLUME_PATH, exist_ok=True)
+        snapshot_download(
+            repo_id=MODEL_ID,
+            local_dir=VOLUME_PATH,
+            ignore_patterns=["*.msgpack", "*.bin", "*.h5"],
+            local_dir_use_symlinks=False
+        )
+        print("Download complete.")
+    else:
+        print(f"Model found in {VOLUME_PATH}.")
+
+# ... שאר הקוד נשאר אותו דבר
+
+
 import os
 import torch
 import runpod
