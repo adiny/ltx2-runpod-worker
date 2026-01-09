@@ -7,5 +7,8 @@ sentencepiece
 soundfile
 librosa
 imageio-ffmpeg
-numpy
 huggingface_hub
+# ספריות שחובה עבור runpod ו-audio
+pillow
+pydantic
+numpy
