@@ -1,0 +1,15 @@
+{
+    "tests": [
+        {
+            "name": "basic_video_generation",
+            "input": {
+                "prompt": "A cat walking on grass, sunny day",
+                "width": 512,
+                "height": 320,
+                "num_frames": 25,
+                "steps": 20
+            },
+            "timeout": 300000
+        }
+    ]
+}
