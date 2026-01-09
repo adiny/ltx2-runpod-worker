@@ -1,98 +1,108 @@
-"""
-LTX Video Generation Handler
-"""
-
-import runpod
-import torch
-import base64
-import tempfile
 import os
-import time
+import torch
+import runpod
+import subprocess
+import soundfile as sf
+import base64
+from diffusers import LTXPipeline
 
-pipeline = None
-MODEL_PATH = "/runpod-volume/ltx-video"
+# הגדרות נתיבים ל-Volume
+VOLUME_PATH = "/runpod-volume/LTX-2"
+MODEL_ID = "Lightricks/LTX-2"
 
-def load_model():
-    global pipeline
-    if pipeline is not None:
-        return pipeline
-    
-    print("🚀 Loading model...")
-    
-    from huggingface_hub import snapshot_download
-    from diffusers import DiffusionPipeline
-    
-    if not os.path.exists(MODEL_PATH):
-        print("📥 Downloading model...")
+pipe = None
+
+def download_model_if_needed():
+    if not os.path.exists(VOLUME_PATH):
+        print(f"Model not found in {VOLUME_PATH}. Downloading LTX-2...")
+        from huggingface_hub import snapshot_download
+        os.makedirs(VOLUME_PATH, exist_ok=True)
         snapshot_download(
-            repo_id="Lightricks/LTX-Video",
-            local_dir=MODEL_PATH,
+            repo_id=MODEL_ID,
+            local_dir=VOLUME_PATH,
+            ignore_patterns=["*.msgpack", "*.bin", "*.h5"],
             local_dir_use_symlinks=False
         )
-    
-    print(f"CUDA: {torch.cuda.is_available()}")
-    
-    pipeline = DiffusionPipeline.from_pretrained(
-        MODEL_PATH,
-        torch_dtype=torch.float16,
+        print("Download complete.")
+    else:
+        print(f"Model found in {VOLUME_PATH}.")
+
+def initialize_pipeline():
+    global pipe
+    print("Loading LTX-2 components...")
+    pipe = LTXPipeline.from_pretrained(
+        VOLUME_PATH,
+        torch_dtype=torch.bfloat16, # LTX-2 מעדיף bfloat16
+        variant="fp16",
+        use_safetensors=True
     )
-    pipeline.to("cuda")
+    pipe.enable_vae_slicing() # קריטי לחיסכון בזיכרון
+    pipe.to("cuda")
+    print("LTX-2 Model loaded!")
+
+def save_audio_video(video_frames, audio_waveform, output_path, fps=24):
+    import imageio_ffmpeg
+    temp_audio = output_path.replace(".mp4", ".wav")
+    temp_video = output_path.replace(".mp4", "_silent.mp4")
     
-    print("✅ Model loaded!")
-    return pipeline
+    # שמירת אודיו (24kHz Stereo)
+    if torch.is_tensor(audio_waveform):
+        audio_waveform = audio_waveform.cpu().float().numpy()
+    sf.write(temp_audio, audio_waveform.T, 24000)
+    
+    # שמירת וידאו
+    from diffusers.utils import export_to_video
+    export_to_video(video_frames, temp_video, fps=fps)
+    
+    # איחוד עם FFmpeg
+    subprocess.run([
+        "ffmpeg", "-y", "-i", temp_video, "-i", temp_audio,
+        "-c:v", "copy", "-c:a", "aac", "-strict", "experimental",
+        "-shortest", output_path
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    os.remove(temp_audio)
+    os.remove(temp_video)
 
 def handler(event):
+    global pipe
+    job_input = event.get("input", {})
+    prompt = job_input.get("prompt")
+    
+    if not prompt:
+        return {"error": "Missing prompt"}
+
     try:
-        input_data = event.get("input", {})
-        prompt = input_data.get("prompt")
+        width = job_input.get("width", 768)
+        height = job_input.get("height", 512)
+        num_frames = job_input.get("num_frames", 121)
+        steps = job_input.get("num_inference_steps", 50)
         
-        if not prompt:
-            return {"error": "Missing prompt"}
-        
-        width = input_data.get("width", 512)
-        height = input_data.get("height", 320)
-        num_frames = input_data.get("num_frames", 41)
-        steps = input_data.get("steps", 30)
-        fps = input_data.get("fps", 24)
-        
-        print(f"🎬 Generating: {prompt[:50]}...")
-        
-        pipe = load_model()
-        
-        start = time.time()
+        # הרצת המודל
         output = pipe(
             prompt=prompt,
-            width=width,
+            negative_prompt=job_input.get("negative_prompt", "low quality"),
             height=height,
+            width=width,
             num_frames=num_frames,
             num_inference_steps=steps,
+            output_type="pt"
         )
-        gen_time = time.time() - start
         
-        print(f"✅ Done in {gen_time:.1f}s")
+        output_path = f"/tmp/ltx_{event['id']}.mp4"
+        save_audio_video(output.frames[0], output.audio[0], output_path)
         
-        from diffusers.utils import export_to_video
-        
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-            path = f.name
-        
-        export_to_video(output.frames[0], path, fps=fps)
-        
-        with open(path, "rb") as f:
+        with open(output_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
-        
-        os.remove(path)
-        torch.cuda.empty_cache()
-        
-        return {
-            "video_base64": video_b64,
-            "generation_time": round(gen_time, 2)
-        }
-        
+            
+        os.remove(output_path)
+        return {"video_base64": video_b64}
+
     except Exception as e:
-        import traceback
-        print(f"❌ {e}\n{traceback.format_exc()}")
+        print(f"Error: {str(e)}")
         return {"error": str(e)}
 
 if __name__ == "__main__":
+    download_model_if_needed()
+    initialize_pipeline()
     runpod.serverless.start({"handler": handler})
