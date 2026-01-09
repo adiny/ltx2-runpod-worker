@@ -16,6 +16,16 @@ RUN pip install --upgrade pip && \
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY src/handler.py /handler.py
+COPY handler.py /handler.py
 
 CMD ["python", "-u", "/handler.py"]
+```
+
+### המבנה הסופי של ה-Repo צריך להיות:
+```
+ltx2-runpod-worker/
+├── Dockerfile
+├── requirements.txt
+├── handler.py          ← בתיקייה הראשית!
+├── .dockerignore
+└── README.md
