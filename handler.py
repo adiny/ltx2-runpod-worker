@@ -1,11 +1,11 @@
 import os
 
-# הפניית Cache ל-Volume
+# הפניית Cache ל-Volume - חייב להיות לפני כל import אחר!
 os.environ["HF_HOME"] = "/runpod-volume/.cache"
 os.environ["HUGGINGFACE_HUB_CACHE"] = "/runpod-volume/.cache"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
-VERSION = "3.0.1-LTX2-FP8"
+VERSION = "3.0.2-LTX2"
 
 import torch
 import runpod
@@ -18,7 +18,6 @@ pipe = None
 REPO_ID = "Lightricks/LTX-2"
 VOLUME_PATH = "/runpod-volume/LTX-2"
 
-# ... שאר הקוד נשאר אותו דבר ...
 
 def save_output(video_frames, audio_waveform, output_path, fps=24):
     """שמירת וידאו + אודיו מאוחדים"""
@@ -50,6 +49,7 @@ def save_output(video_frames, audio_waveform, output_path, fps=24):
     if os.path.exists(temp_video):
         os.remove(temp_video)
 
+
 def load_model():
     global pipe
     if pipe is not None:
@@ -62,16 +62,20 @@ def load_model():
     
     from huggingface_hub import snapshot_download
     
-    if not os.path.exists(VOLUME_PATH):
+    # יצירת תיקיית cache
+    os.makedirs("/runpod-volume/.cache", exist_ok=True)
+    
+    # בדיקה אם המודל כבר הורד
+    if not os.path.exists(os.path.join(VOLUME_PATH, "config.json")):
         print("📥 Downloading LTX-2...")
         snapshot_download(
             repo_id=REPO_ID,
             local_dir=VOLUME_PATH,
-            allow_patterns=["*fp8*", "*.json", "*.txt", "tokenizer*", "text_encoder*"],
+            ignore_patterns=["*.md", "*.git*"],
             local_dir_use_symlinks=False
         )
     else:
-        print(f"✅ Using cached model")
+        print(f"✅ Using cached model from {VOLUME_PATH}")
     
     print("Loading pipeline...")
     try:
@@ -79,9 +83,9 @@ def load_model():
         pipe = LTXPipeline.from_pretrained(
             VOLUME_PATH,
             torch_dtype=torch.bfloat16,
-            variant="fp8",
             use_safetensors=True
         )
+        print("✅ Loaded LTXPipeline")
     except Exception as e:
         print(f"⚠️ LTXPipeline failed: {e}")
         from diffusers import DiffusionPipeline
@@ -90,10 +94,12 @@ def load_model():
             torch_dtype=torch.bfloat16,
             use_safetensors=True
         )
+        print("✅ Loaded DiffusionPipeline (fallback)")
 
     pipe.enable_model_cpu_offload()
-    print("✅ Model loaded!")
+    print("✅ Model loaded and ready!")
     return pipe
+
 
 def handler(event):
     try:
@@ -110,6 +116,7 @@ def handler(event):
         fps = job_input.get("fps", 24)
         
         print(f"🎬 Generating: {prompt[:50]}...")
+        print(f"Settings: {width}x{height}, {num_frames} frames, {steps} steps")
         
         pipeline = load_model()
         
@@ -125,7 +132,7 @@ def handler(event):
         )
         gen_time = time.time() - start
         
-        print(f"✅ Done in {gen_time:.1f}s")
+        print(f"✅ Generation done in {gen_time:.1f}s")
         
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             out_path = f.name
@@ -149,6 +156,7 @@ def handler(event):
         import traceback
         print(f"❌ {e}\n{traceback.format_exc()}")
         return {"error": str(e)}
+
 
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
