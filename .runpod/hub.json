@@ -1,0 +1,18 @@
+{
+    "title": "LTX-2 Video Generation",
+    "description": "Generate videos using Lightricks LTX-2 model",
+    "category": "Video",
+    "env": [
+        {
+            "key": "HF_HOME",
+            "value": "/runpod-volume/huggingface"
+        }
+    ],
+    "gpu": {
+        "recommended": "L40S",
+        "minimum": "RTX A6000"
+    },
+    "volume": {
+        "recommended": 50
+    }
+}
