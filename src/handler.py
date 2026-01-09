@@ -1,6 +1,5 @@
 """
-LTX-2 RunPod Serverless Handler
-Video generation using Lightricks LTX-2 model
+LTX Video RunPod Serverless Handler
 """
 
 import runpod
@@ -12,83 +11,77 @@ import time
 
 # Global pipeline
 pipeline = None
-MODEL_ID = "Lightricks/LTX-Video"
 
 
 def load_model():
-    """Download and load the LTX model"""
+    """Load the LTX Video model"""
     global pipeline
     
     if pipeline is not None:
         return pipeline
     
-    print("🚀 Loading LTX model...")
+    print("🚀 Loading model...")
     start_time = time.time()
     
     try:
-        from diffusers import LTXPipeline
-        
-        # Check CUDA availability
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available")
+        from diffusers import DiffusionPipeline
         
         print(f"CUDA available: {torch.cuda.is_available()}")
-        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        if torch.cuda.is_available():
+            print(f"CUDA device: {torch.cuda.get_device_name(0)}")
         
-        pipeline = LTXPipeline.from_pretrained(
-            MODEL_ID,
+        # Load a simpler text-to-video model that works
+        pipeline = DiffusionPipeline.from_pretrained(
+            "damo-vilab/text-to-video-ms-1.7b",
             torch_dtype=torch.float16,
+            variant="fp16"
         )
         pipeline.to("cuda")
         
-        print(f"✅ Model loaded in {time.time() - start_time:.2f} seconds")
+        # Enable memory optimization
+        pipeline.enable_model_cpu_offload()
+        pipeline.enable_vae_slicing()
+        
+        print(f"✅ Model loaded in {time.time() - start_time:.2f}s")
         return pipeline
         
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
+        print(f"❌ Error: {e}")
         raise
 
 
 def handler(event):
-    """RunPod serverless handler"""
+    """RunPod handler"""
     try:
         input_data = event.get("input", {})
         
-        # Validate
         prompt = input_data.get("prompt")
         if not prompt:
-            return {"error": "Missing required field: prompt"}
+            return {"error": "Missing prompt"}
         
         # Parameters
-        negative_prompt = input_data.get("negative_prompt", "blurry, low quality, distorted")
-        width = input_data.get("width", 512)
-        height = input_data.get("height", 320)
-        num_frames = input_data.get("num_frames", 41)
-        num_inference_steps = input_data.get("steps", 30)
+        negative_prompt = input_data.get("negative_prompt", "blurry, low quality")
+        num_frames = min(input_data.get("num_frames", 16), 24)  # Max 24 frames
+        num_inference_steps = input_data.get("steps", 25)
         guidance_scale = input_data.get("guidance_scale", 7.5)
-        fps = input_data.get("fps", 24)
+        fps = input_data.get("fps", 8)
         seed = input_data.get("seed", -1)
         
-        # Set seed
         if seed == -1:
             seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
         
         generator = torch.Generator(device="cuda").manual_seed(seed)
         
-        print(f"🎬 Generating: {width}x{height}, {num_frames} frames")
-        print(f"📝 Prompt: {prompt[:80]}...")
+        print(f"🎬 Generating {num_frames} frames...")
+        print(f"📝 Prompt: {prompt[:60]}...")
         
-        # Load model
         pipe = load_model()
         
-        # Generate
         start_time = time.time()
         
         output = pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
-            width=width,
-            height=height,
             num_frames=num_frames,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
@@ -96,15 +89,12 @@ def handler(event):
         )
         
         generation_time = time.time() - start_time
-        print(f"✅ Generated in {generation_time:.2f} seconds")
+        print(f"✅ Done in {generation_time:.2f}s")
         
         # Get frames
-        if hasattr(output, 'frames'):
-            frames = output.frames[0]
-        else:
-            frames = output.images
+        frames = output.frames[0]
         
-        # Export video
+        # Export
         from diffusers.utils import export_to_video
         
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -112,11 +102,9 @@ def handler(event):
         
         export_to_video(frames, output_path, fps=fps)
         
-        # Read and encode
         with open(output_path, "rb") as f:
             video_base64 = base64.b64encode(f.read()).decode("utf-8")
         
-        # Cleanup
         os.remove(output_path)
         torch.cuda.empty_cache()
         
@@ -128,8 +116,7 @@ def handler(event):
         
     except Exception as e:
         import traceback
-        error_msg = f"{str(e)}\n{traceback.format_exc()}"
-        print(f"❌ Error: {error_msg}")
+        print(f"❌ {e}\n{traceback.format_exc()}")
         return {"error": str(e)}
 
 
