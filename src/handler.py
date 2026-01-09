@@ -1,213 +1,98 @@
-import os
-import torch
+"""
+LTX Video Generation Handler
+"""
+
 import runpod
-import subprocess
-import numpy as np
-import soundfile as sf
-from pathlib import Path
-from typing import Dict, Any
+import torch
+import base64
+import tempfile
+import os
+import time
 
-# יבוא ספריות המודל (בהנחה שאתה משתמש ב-Diffusers או בפורק הרשמי של LTX)
-# הערה: אם הספרייה הרשמית שונה, יש להתאים את ה-Import
-from diffusers import LTXPipeline, LTXVideoTransformer3DModel
-from transformers import AutoTokenizer, T5EncoderModel
+pipeline = None
+MODEL_PATH = "/runpod-volume/ltx-video"
 
-# הגדרות נתיבים ל-Volume של Runpod
-# זה קריטי כדי לא להוריד 50GB בכל הפעלה מחדש
-VOLUME_PATH = "/runpod-volume/LTX-2"
-MODEL_ID = "Lightricks/LTX-2"
-
-# משתנה גלובלי להחזקת המודל בזיכרון
-pipe = None
-
-def download_model_if_needed():
-    """
-    בודק אם המשקלים קיימים ב-Volume. אם לא, מוריד אותם בצורה חכמה.
-    משתמש ב-snapshot_download כדי לתמוך בחידוש הורדה.
-    """
-    if not os.path.exists(VOLUME_PATH):
-        print(f"Model not found in {VOLUME_PATH}. Downloading from HuggingFace...")
-        from huggingface_hub import snapshot_download
-        
-        os.makedirs(VOLUME_PATH, exist_ok=True)
+def load_model():
+    global pipeline
+    if pipeline is not None:
+        return pipeline
+    
+    print("🚀 Loading model...")
+    
+    from huggingface_hub import snapshot_download
+    from diffusers import DiffusionPipeline
+    
+    if not os.path.exists(MODEL_PATH):
+        print("📥 Downloading model...")
         snapshot_download(
-            repo_id=MODEL_ID,
-            local_dir=VOLUME_PATH,
-            # מסננים קבצים לא רלוונטיים כדי לחסוך מקום
-            ignore_patterns=["*.msgpack", "*.bin", "*.h5"], 
+            repo_id="Lightricks/LTX-Video",
+            local_dir=MODEL_PATH,
             local_dir_use_symlinks=False
         )
-        print("Download complete.")
-    else:
-        print(f"Model found in {VOLUME_PATH}. Skipping download.")
-
-def initialize_pipeline():
-    """
-    טוען את המודל ל-GPU. פונקציה זו רצה פעם אחת בעת עליית הקונטיינר.
-    """
-    global pipe
     
-    print("Loading LTX-2 components...")
+    print(f"CUDA: {torch.cuda.is_available()}")
     
-    # טעינת המודל מה-Volume המקומי
-    # אנו משתמשים ב-float16 לחיסכון בזיכרון ומהירות (Flash Attention)
-    pipe = LTXPipeline.from_pretrained(
-        VOLUME_PATH,
+    pipeline = DiffusionPipeline.from_pretrained(
+        MODEL_PATH,
         torch_dtype=torch.float16,
-        variant="fp16",
-        use_safetensors=True
     )
+    pipeline.to("cuda")
     
-    # אופטימיזציות זיכרון קריטיות ל-Runpod
-    # מפעיל VAE Slicing כדי למנוע קריסת זיכרון בעת פענוח וידאו ארוך
-    pipe.enable_vae_slicing()
-    
-    # העברה ל-GPU
-    pipe.to("cuda")
-    
-    # הידור אופציונלי (אם נתמך בסביבה) לשיפור ביצועים של כ-20%
-    # pipe.transformer = torch.compile(pipe.transformer, mode="reduce-overhead", fullgraph=True)
-    
-    print("LTX-2 Model loaded successfully!")
+    print("✅ Model loaded!")
+    return pipeline
 
-def save_audio_video(video_frames, audio_waveform, output_path, fps=24):
-    """
-    מאחד את הוידאו והאודיו לקובץ MP4 אחד.
-    LTX-2 מוציא אודיו ב-24kHz סטריאו.
-    """
-    import imageio_ffmpeg
-    
-    # שמירת האודיו זמנית כ-WAV (24kHz Stereo)
-    temp_audio_path = output_path.replace(".mp4", ".wav")
-    # המרת ה-Tensor ל-Numpy במידת הצורך
-    if torch.is_tensor(audio_waveform):
-        audio_waveform = audio_waveform.cpu().float().numpy()
-        
-    # כתיבת קובץ האודיו (Assuming shape is [Channels, Samples] or [Samples, Channels])
-    # ה-Vocoder של LTX מוציא סטריאו
-    sf.write(temp_audio_path, audio_waveform.T, 24000) 
-    
-    # שמירת הוידאו זמנית
-    temp_video_path = output_path.replace(".mp4", "_silent.mp4")
-    from diffusers.utils import export_to_video
-    export_to_video(video_frames, temp_video_path, fps=fps)
-    
-    # איחוד באמצעות FFmpeg
-    # משתמשים ב-AAC לאודיו ו-H.264 לוידאו לתאימות מקסימלית
-    command = [
-        "ffmpeg", "-y",
-        "-i", temp_video_path,
-        "-i", temp_audio_path,
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-strict", "experimental",
-        "-shortest", # חותך לפי הקצר מביניהם למניעת מסך שחור/שקט
-        output_path
-    ]
-    
-    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # ניקוי קבצים זמניים
-    os.remove(temp_audio_path)
-    os.remove(temp_video_path)
-
-def handler(event: Dict[str, Any]):
-    """
-    הפונקציה הראשית שמטפלת בכל בקשה (Request) מ-Runpod.
-    """
-    global pipe
-    
-    # 1. חילוץ פרמטרים מהבקשה
-    job_input = event.get("input", {})
-    
-    prompt = job_input.get("prompt")
-    negative_prompt = job_input.get("negative_prompt", "low quality, worst quality, deformed, distorted")
-    image_url = job_input.get("image_url") # אופציונלי: עבור Image-to-Video
-    
-    # פרמטרים מתקדמים ל-LTX
-    width = job_input.get("width", 768)
-    height = job_input.get("height", 512)
-    num_frames = job_input.get("num_frames", 121) # ~5 שניות ב-24fps
-    num_inference_steps = job_input.get("num_inference_steps", 50)
-    guidance_scale = job_input.get("guidance_scale", 3.0) # st (Text Guidance)
-    audio_guidance_scale = job_input.get("audio_guidance_scale", 3.0) # sm (Cross-Modal Guidance)
-    seed = job_input.get("seed", None)
-
-    if not prompt and not image_url:
-        return {"error": "Must provide 'prompt' or 'image_url'"}
-
-    # הגדרת Seed לשחזור תוצאות
-    generator = torch.Generator("cuda").manual_seed(seed) if seed else None
-
-    # 2. הרצת המודל (Inference)
-    # הערה: אנו קוראים לצינור שמחזיר גם וידאו וגם אודיו
+def handler(event):
     try:
-        # אם יש תמונת מקור, טוענים אותה (לוגיקה בסיסית)
-        image = None
-        if image_url:
-            from diffusers.utils import load_image
-            image = load_image(image_url)
-
+        input_data = event.get("input", {})
+        prompt = input_data.get("prompt")
+        
+        if not prompt:
+            return {"error": "Missing prompt"}
+        
+        width = input_data.get("width", 512)
+        height = input_data.get("height", 320)
+        num_frames = input_data.get("num_frames", 41)
+        steps = input_data.get("steps", 30)
+        fps = input_data.get("fps", 24)
+        
+        print(f"🎬 Generating: {prompt[:50]}...")
+        
+        pipe = load_model()
+        
+        start = time.time()
         output = pipe(
             prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=image,
-            height=height,
             width=width,
+            height=height,
             num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            # פרמטרים ספציפיים ל-LTX אודיו (בהתאם למימוש הספריה)
-            audio_guidance_scale=audio_guidance_scale, 
-            generator=generator,
-            output_type="pt" # מחזיר Tensors גולמיים לעיבוד
+            num_inference_steps=steps,
         )
+        gen_time = time.time() - start
         
-        # 3. שמירת התוצאה
-        output_filename = f"/tmp/ltx_out_{event['id']}.mp4"
+        print(f"✅ Done in {gen_time:.1f}s")
         
-        # ההנחה: הפלט מכיל 'frames' ו-'audio'
-        # ה-Audio Waveform מגיע מה-Vocoder ב-24kHz
-        save_audio_video(
-            output.frames[0], 
-            output.audio[0], 
-            output_filename
-        )
-
-        # 4. העלאה לאחסון (אופציונלי - כאן מחזירים Base64 או URL)
-        # עבור Runpod Sync, לרוב מחזירים Base64 לקבצים קטנים או מעלים ל-Bucket
-        # כאן נדגים החזרה של נתיב (אם משתמשים ב-Volume משותף) או קידוד
+        from diffusers.utils import export_to_video
         
-        # בדוגמה זו: נקרא ותחזיר כ-Base64 (פחות מומלץ לוידאו ארוך, עדיף להעלות ל-S3)
-        with open(output_filename, "rb") as video_file:
-            video_b64 = base64.b64encode(video_file.read()).decode('utf-8')
-            
-        # ניקוי
-        os.remove(output_filename)
-
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            path = f.name
+        
+        export_to_video(output.frames[0], path, fps=fps)
+        
+        with open(path, "rb") as f:
+            video_b64 = base64.b64encode(f.read()).decode()
+        
+        os.remove(path)
+        torch.cuda.empty_cache()
+        
         return {
-            "status": "success",
             "video_base64": video_b64,
-            "metadata": {
-                "duration": num_frames / 24.0,
-                "audio_sample_rate": 24000,
-                "channels": "stereo"
-            }
+            "generation_time": round(gen_time, 2)
         }
-
+        
     except Exception as e:
-        print(f"Inference error: {str(e)}")
+        import traceback
+        print(f"❌ {e}\n{traceback.format_exc()}")
         return {"error": str(e)}
 
-# ----------------------------------------------------------------------------
-# Runpod Entry Point
-# ----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # 1. שלב ה-Build/Init: הורדת מודל
-    download_model_if_needed()
-    
-    # 2. שלב הטעינה: טעינה לזיכרון
-    initialize_pipeline()
-    
-    # 3. התחלת ה-Serverless Handler
     runpod.serverless.start({"handler": handler})
