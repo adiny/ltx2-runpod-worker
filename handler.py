@@ -1,6 +1,12 @@
-VERSION = "3.0.0-LTX2-FP8"
-
 import os
+
+# הפניית Cache ל-Volume
+os.environ["HF_HOME"] = "/runpod-volume/.cache"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/runpod-volume/.cache"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
+VERSION = "3.0.1-LTX2-FP8"
+
 import torch
 import runpod
 import base64
@@ -11,6 +17,8 @@ import subprocess
 pipe = None
 REPO_ID = "Lightricks/LTX-2"
 VOLUME_PATH = "/runpod-volume/LTX-2"
+
+# ... שאר הקוד נשאר אותו דבר ...
 
 def save_output(video_frames, audio_waveform, output_path, fps=24):
     """שמירת וידאו + אודיו מאוחדים"""
