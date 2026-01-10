@@ -5,7 +5,12 @@ os.environ["HF_HOME"] = "/runpod-volume/.cache"
 os.environ["HUGGINGFACE_HUB_CACHE"] = "/runpod-volume/.cache"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
-VERSION = "3.0.2-LTX2"
+# הפניית TMPDIR ל-Volume (קריטי לפתרון בעיית הדיסק!)
+os.environ["TMPDIR"] = "/runpod-volume/tmp"
+os.environ["TEMP"] = "/runpod-volume/tmp"
+os.environ["TMP"] = "/runpod-volume/tmp"
+
+VERSION = "3.0.3-LTX2"
 
 import torch
 import runpod
@@ -13,6 +18,7 @@ import base64
 import tempfile
 import time
 import subprocess
+import shutil
 
 pipe = None
 REPO_ID = "Lightricks/LTX-2"
@@ -62,8 +68,16 @@ def load_model():
     
     from huggingface_hub import snapshot_download
     
-    # יצירת תיקיית cache
+    # יצירת תיקיות נחוצות
     os.makedirs("/runpod-volume/.cache", exist_ok=True)
+    os.makedirs("/runpod-volume/tmp", exist_ok=True)
+    
+    # הדפסת מקום פנוי ב-Volume
+    try:
+        total, used, free = shutil.disk_usage("/runpod-volume")
+        print(f"💾 Volume space: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
+    except Exception as e:
+        print(f"⚠️ Could not check disk space: {e}")
     
     # בדיקה אם המודל כבר הורד
     if not os.path.exists(os.path.join(VOLUME_PATH, "config.json")):
@@ -72,8 +86,8 @@ def load_model():
             repo_id=REPO_ID,
             local_dir=VOLUME_PATH,
             ignore_patterns=["*.md", "*.git*"],
-            local_dir_use_symlinks=False
         )
+        print("✅ Download complete!")
     else:
         print(f"✅ Using cached model from {VOLUME_PATH}")
     
