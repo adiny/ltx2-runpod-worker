@@ -1,9 +1,6 @@
-VERSION = "4.7.0-PARALLEL"
+VERSION = "5.0.0-BAKED-LTX2"
 
 import os
-import sys
-import json
-import requests
 import torch
 import runpod
 import base64
@@ -11,95 +8,10 @@ import tempfile
 import time
 import subprocess
 import soundfile as sf
-import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 
-MODEL_PATH = "/root/LTX-2"
-os.environ["TMPDIR"] = "/root/tmp"
-os.environ["HF_HOME"] = "/root/hf_cache"
-
+MODEL_PATH = "/models/LTX-2"
 pipe = None
-HF_REPO = "Lightricks/LTX-2"
-
-
-def download_file(args):
-    """Download a single file"""
-    url, dest_path = args
-    try:
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        response = requests.get(url, stream=True, timeout=300)
-        with open(dest_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=1024*1024):
-                f.write(chunk)
-        return True, dest_path
-    except Exception as e:
-        return False, str(e)
-
-
-def get_all_files(path=""):
-    """Recursively get all files from HF repo"""
-    url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main"
-    if path:
-        url = f"{url}/{path}"
-    
-    try:
-        resp = requests.get(url, timeout=30)
-        if resp.status_code != 200:
-            return []
-    except:
-        return []
-    
-    files = []
-    for item in resp.json():
-        if item['type'] == 'file':
-            if not item['path'].endswith('.md') and '.git' not in item['path']:
-                files.append(item['path'])
-        elif item['type'] == 'directory':
-            files.extend(get_all_files(item['path']))
-    return files
-
-
-def download_model_parallel():
-    """Download model files in parallel"""
-    print(f"📥 Getting file list from {HF_REPO}...")
-    
-    files = get_all_files()
-    print(f"   Found {len(files)} files")
-    
-    # Filter out already downloaded
-    base_url = f"https://huggingface.co/{HF_REPO}/resolve/main"
-    downloads = []
-    
-    for file_path in files:
-        dest = os.path.join(MODEL_PATH, file_path)
-        if not os.path.exists(dest):
-            url = f"{base_url}/{file_path}"
-            downloads.append((url, dest))
-    
-    if not downloads:
-        print("   All files already downloaded!")
-        return
-    
-    print(f"   Downloading {len(downloads)} files in parallel...")
-    
-    # Download with 10 parallel threads
-    completed = 0
-    failed = 0
-    
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(download_file, args): args for args in downloads}
-        
-        for future in as_completed(futures):
-            success, result = future.result()
-            if success:
-                completed += 1
-            else:
-                failed += 1
-            
-            if completed % 10 == 0:
-                print(f"   Progress: {completed}/{len(downloads)}")
-    
-    print(f"✅ Download complete! ({completed} ok, {failed} failed)")
 
 
 def get_audio_duration(file_path):
@@ -155,28 +67,10 @@ def load_model():
     
     print(f"🚀 Version: {VERSION}")
     print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
+    print(f"📦 Loading from {MODEL_PATH}")
     
-    # Check disk space
-    print("💾 Disk space:")
-    for path in ["/", "/root"]:
-        try:
-            total, used, free = shutil.disk_usage(path)
-            print(f"   {path}: {free // (1024**3)}GB free")
-        except:
-            pass
-    
-    os.makedirs("/root/tmp", exist_ok=True)
-    os.makedirs(MODEL_PATH, exist_ok=True)
-    
-    config_path = os.path.join(MODEL_PATH, "config.json")
-    if not os.path.exists(config_path):
-        download_model_parallel()
-    else:
-        print(f"✅ Model cached at {MODEL_PATH}")
-    
-    print("⏳ Loading pipeline...")
-    from diffusers import LTXPipeline
-    pipe = LTXPipeline.from_pretrained(
+    from diffusers import LTX2Pipeline
+    pipe = LTX2Pipeline.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
         use_safetensors=True,
@@ -204,7 +98,7 @@ def handler(event):
         input_audio_path = None
         
         if audio_url:
-            input_audio_path = tempfile.mktemp(suffix=".mp3", dir="/root/tmp")
+            input_audio_path = tempfile.mktemp(suffix=".mp3")
             temp_files.append(input_audio_path)
             download_audio(audio_url, input_audio_path)
             
@@ -231,7 +125,7 @@ def handler(event):
         
         print(f"✅ {gen_time:.1f}s")
         
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir="/root/tmp") as f:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             out_path = f.name
             temp_files.append(out_path)
             
