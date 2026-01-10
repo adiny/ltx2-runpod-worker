@@ -1,4 +1,4 @@
-VERSION = "4.6.0-DIRECT-DOWNLOAD"
+VERSION = "4.7.0-PARALLEL"
 
 import os
 import sys
@@ -13,82 +13,93 @@ import subprocess
 import soundfile as sf
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
 
-# Use overlay filesystem which should have more space
 MODEL_PATH = "/root/LTX-2"
 os.environ["TMPDIR"] = "/root/tmp"
 os.environ["HF_HOME"] = "/root/hf_cache"
 
 pipe = None
 HF_REPO = "Lightricks/LTX-2"
-HF_API = "https://huggingface.co/api/models"
 
 
-def download_file(url, dest_path, desc=""):
-    """Download a single file with progress"""
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    
-    response = requests.get(url, stream=True)
-    total = int(response.headers.get('content-length', 0))
-    
-    with open(dest_path, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
-    
-    return dest_path
+def download_file(args):
+    """Download a single file"""
+    url, dest_path = args
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        response = requests.get(url, stream=True, timeout=300)
+        with open(dest_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=1024*1024):
+                f.write(chunk)
+        return True, dest_path
+    except Exception as e:
+        return False, str(e)
 
 
-def download_model_direct():
-    """Download model files directly from Hugging Face"""
-    print(f"📥 Downloading {HF_REPO} directly...")
+def get_all_files(path=""):
+    """Recursively get all files from HF repo"""
+    url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main"
+    if path:
+        url = f"{url}/{path}"
     
-    # Get file list from HF API
-    api_url = f"{HF_API}/{HF_REPO}"
-    response = requests.get(api_url)
-    
-    if response.status_code != 200:
-        raise Exception(f"Failed to get model info: {response.status_code}")
-    
-    # Get siblings (files)
-    tree_url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main"
-    
-    def get_all_files(path=""):
-        url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main/{path}" if path else tree_url
-        resp = requests.get(url)
+    try:
+        resp = requests.get(url, timeout=30)
         if resp.status_code != 200:
             return []
-        
-        files = []
-        for item in resp.json():
-            if item['type'] == 'file':
-                if not item['path'].endswith('.md') and '.git' not in item['path']:
-                    files.append(item['path'])
-            elif item['type'] == 'directory':
-                files.extend(get_all_files(item['path']))
-        return files
+    except:
+        return []
+    
+    files = []
+    for item in resp.json():
+        if item['type'] == 'file':
+            if not item['path'].endswith('.md') and '.git' not in item['path']:
+                files.append(item['path'])
+        elif item['type'] == 'directory':
+            files.extend(get_all_files(item['path']))
+    return files
+
+
+def download_model_parallel():
+    """Download model files in parallel"""
+    print(f"📥 Getting file list from {HF_REPO}...")
     
     files = get_all_files()
-    print(f"   Found {len(files)} files to download")
+    print(f"   Found {len(files)} files")
     
-    # Download each file
+    # Filter out already downloaded
     base_url = f"https://huggingface.co/{HF_REPO}/resolve/main"
+    downloads = []
     
-    for i, file_path in enumerate(files):
+    for file_path in files:
         dest = os.path.join(MODEL_PATH, file_path)
-        
-        if os.path.exists(dest):
-            continue
-            
-        url = f"{base_url}/{file_path}"
-        print(f"   [{i+1}/{len(files)}] {file_path}")
-        
-        try:
-            download_file(url, dest)
-        except Exception as e:
-            print(f"   ⚠️ Failed: {e}")
+        if not os.path.exists(dest):
+            url = f"{base_url}/{file_path}"
+            downloads.append((url, dest))
     
-    print("✅ Download complete!")
+    if not downloads:
+        print("   All files already downloaded!")
+        return
+    
+    print(f"   Downloading {len(downloads)} files in parallel...")
+    
+    # Download with 10 parallel threads
+    completed = 0
+    failed = 0
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(download_file, args): args for args in downloads}
+        
+        for future in as_completed(futures):
+            success, result = future.result()
+            if success:
+                completed += 1
+            else:
+                failed += 1
+            
+            if completed % 10 == 0:
+                print(f"   Progress: {completed}/{len(downloads)}")
+    
+    print(f"✅ Download complete! ({completed} ok, {failed} failed)")
 
 
 def get_audio_duration(file_path):
@@ -97,14 +108,11 @@ def get_audio_duration(file_path):
 
 
 def download_audio(url, save_path):
-    print(f"📥 Downloading audio from: {url}")
     response = requests.get(url, stream=True)
     if response.status_code == 200:
         with open(save_path, 'wb') as f:
             for chunk in response.iter_content(1024):
                 f.write(chunk)
-    else:
-        raise Exception(f"Failed to download audio. Status: {response.status_code}")
 
 
 def save_final_output(video_frames, input_audio_path, generated_audio_waveform, output_path, fps=24):
@@ -118,10 +126,8 @@ def save_final_output(video_frames, input_audio_path, generated_audio_waveform, 
     ffmpeg_cmd = ["ffmpeg", "-y", "-i", temp_video]
     
     if input_audio_path and os.path.exists(input_audio_path):
-        print("🎵 Merging USER audio...")
         ffmpeg_cmd.extend(["-i", input_audio_path, "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest"])
     elif generated_audio_waveform is not None:
-        print("🎵 Merging GENERATED audio...")
         temp_audio = output_path.replace(".mp4", ".wav")
         if torch.is_tensor(generated_audio_waveform):
             generated_audio_waveform = generated_audio_waveform.cpu().float().numpy()
@@ -130,7 +136,6 @@ def save_final_output(video_frames, input_audio_path, generated_audio_waveform, 
         sf.write(temp_audio, generated_audio_waveform, 24000)
         ffmpeg_cmd.extend(["-i", temp_audio, "-c:v", "copy", "-c:a", "aac", "-shortest"])
     else:
-        print("🔇 No audio source.")
         os.rename(temp_video, output_path)
         return
 
@@ -149,26 +154,23 @@ def load_model():
         return pipe
     
     print(f"🚀 Version: {VERSION}")
-    print(f"CUDA: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     
-    # Check disk space on all paths
+    # Check disk space
     print("💾 Disk space:")
-    for path in ["/", "/tmp", "/root", "/workspace"]:
+    for path in ["/", "/root"]:
         try:
             total, used, free = shutil.disk_usage(path)
-            print(f"   {path}: {free // (1024**3)}GB free / {total // (1024**3)}GB total")
+            print(f"   {path}: {free // (1024**3)}GB free")
         except:
-            print(f"   {path}: N/A")
+            pass
     
     os.makedirs("/root/tmp", exist_ok=True)
-    os.makedirs("/root/hf_cache", exist_ok=True)
     os.makedirs(MODEL_PATH, exist_ok=True)
     
     config_path = os.path.join(MODEL_PATH, "config.json")
     if not os.path.exists(config_path):
-        download_model_direct()
+        download_model_parallel()
     else:
         print(f"✅ Model cached at {MODEL_PATH}")
     
@@ -209,14 +211,11 @@ def handler(event):
             duration = get_audio_duration(input_audio_path)
             calculated_frames = int(duration * fps) + 8
             calculated_frames = calculated_frames - (calculated_frames % 8) + 1
-            
-            print(f"🎙️ Audio: {duration:.2f}s -> {calculated_frames} frames")
             num_frames = min(calculated_frames, 257)
 
         pipeline = load_model()
         
-        print(f"🎬 Generating: {prompt[:50]}...")
-        print(f"   {width}x{height}, {num_frames} frames")
+        print(f"🎬 {prompt[:50]}... ({width}x{height}, {num_frames}f)")
         
         start = time.time()
         output = pipeline(
@@ -230,7 +229,7 @@ def handler(event):
         )
         gen_time = time.time() - start
         
-        print(f"✅ Done in {gen_time:.1f}s")
+        print(f"✅ {gen_time:.1f}s")
         
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir="/root/tmp") as f:
             out_path = f.name
@@ -247,14 +246,13 @@ def handler(event):
         return {
             "video_base64": video_b64,
             "generation_time": round(gen_time, 2),
-            "frames": num_frames,
-            "has_audio": input_audio_path is not None or generated_audio is not None
+            "frames": num_frames
         }
 
     except Exception as e:
         import traceback
         print(f"❌ {e}\n{traceback.format_exc()}")
-        return {"error": str(e), "traceback": traceback.format_exc()}
+        return {"error": str(e)}
     finally:
         for f in temp_files:
             if f and os.path.exists(f):
