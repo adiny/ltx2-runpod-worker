@@ -10,16 +10,18 @@ RUN apt-get update --yes && \
     libsndfile1 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-
-# Install accelerate FIRST, then verify it works
+# Install accelerate with all dependencies FIRST
 RUN pip install --upgrade pip && \
-    pip install ninja packaging wheel && \
-    pip install "accelerate>=1.2.0" --no-cache-dir && \
-    python -c "import accelerate; print(f'accelerate {accelerate.__version__} installed')" && \
-    pip install git+https://github.com/huggingface/diffusers.git --no-cache-dir && \
-    pip install --no-cache-dir -r requirements.txt && \
+    pip install ninja packaging wheel setuptools && \
+    pip install "accelerate>=1.2.0" "safetensors>=0.4.0" --no-cache-dir && \
+    pip install git+https://github.com/huggingface/diffusers.git --no-cache-dir
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
     pip cache purge
+
+# Verify accelerate is working
+RUN python -c "from accelerate import Accelerator; print('accelerate OK')"
 
 COPY handler.py /handler.py
 
