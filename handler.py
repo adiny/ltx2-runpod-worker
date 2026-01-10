@@ -1,4 +1,4 @@
-VERSION = "5.3.0-LTX2-HFHUB"
+VERSION = "5.4.0-PATH-DEBUG"
 
 import os
 import sys
@@ -12,37 +12,76 @@ import soundfile as sf
 import requests
 import shutil
 
-# Disable XET to avoid disk quota issues
+# Disable XET
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-os.environ["TMPDIR"] = "/root/tmp"
-os.environ["HF_HOME"] = "/root/hf_cache"
-os.environ["HUGGINGFACE_HUB_CACHE"] = "/root/hf_cache"
 
-MODEL_PATH = "/root/LTX-2"
 pipe = None
 HF_REPO = "Lightricks/LTX-2"
 
 
-def download_model():
-    """Download model using huggingface_hub"""
-    print(f"📥 Downloading {HF_REPO} using huggingface_hub...")
+def find_best_path():
+    """Find path with most free space"""
+    paths_to_try = [
+        "/runpod-volume",
+        "/workspace", 
+        "/root",
+        "/tmp",
+        "/opt",
+        "/home",
+    ]
     
-    os.makedirs("/root/tmp", exist_ok=True)
-    os.makedirs("/root/hf_cache", exist_ok=True)
-    os.makedirs(MODEL_PATH, exist_ok=True)
+    best_path = "/root"
+    best_free = 0
+    
+    print("💾 Checking disk space on all paths:")
+    for path in paths_to_try:
+        try:
+            if os.path.exists(path) or path in ["/tmp", "/opt", "/home"]:
+                os.makedirs(path, exist_ok=True)
+                total, used, free = shutil.disk_usage(path)
+                free_gb = free // (1024**3)
+                print(f"   {path}: {free_gb}GB free / {total // (1024**3)}GB total")
+                if free > best_free:
+                    best_free = free
+                    best_path = path
+        except Exception as e:
+            print(f"   {path}: Error - {e}")
+    
+    print(f"✅ Best path: {best_path} ({best_free // (1024**3)}GB free)")
+    return best_path
+
+
+def download_model(model_path):
+    """Download model using huggingface_hub"""
+    print(f"📥 Downloading {HF_REPO} to {model_path}...")
+    
+    cache_dir = os.path.join(os.path.dirname(model_path), "hf_cache")
+    tmp_dir = os.path.join(os.path.dirname(model_path), "tmp")
+    
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(tmp_dir, exist_ok=True)
+    os.makedirs(model_path, exist_ok=True)
+    
+    os.environ["TMPDIR"] = tmp_dir
+    os.environ["HF_HOME"] = cache_dir
+    os.environ["HUGGINGFACE_HUB_CACHE"] = cache_dir
     
     from huggingface_hub import snapshot_download
     
     snapshot_download(
         repo_id=HF_REPO,
-        local_dir=MODEL_PATH,
-        cache_dir="/root/hf_cache",
-        ignore_patterns=["*.md", "*.git*", "*.mp4"],
+        local_dir=model_path,
+        cache_dir=cache_dir,
+        ignore_patterns=["*.md", "*.git*", "*.mp4", "*fp4*", "*fp8*", "*distilled*", "*19b-dev.safetensors"],
         local_dir_use_symlinks=False,
-        resume_download=True,
-        max_workers=4,
+        max_workers=2,
     )
+    
+    # Clean cache after download
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        print("🧹 Cleaned cache")
     
     print("✅ Download complete!")
 
@@ -101,26 +140,22 @@ def load_model():
     print(f"🚀 Version: {VERSION}")
     print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     
-    print("💾 Disk space:")
-    for path in ["/", "/root"]:
-        try:
-            total, used, free = shutil.disk_usage(path)
-            print(f"   {path}: {free // (1024**3)}GB free")
-        except:
-            pass
+    # Find best path
+    base_path = find_best_path()
+    model_path = os.path.join(base_path, "LTX-2")
     
     # Download model if needed
-    config_path = os.path.join(MODEL_PATH, "model_index.json")
+    config_path = os.path.join(model_path, "model_index.json")
     if not os.path.exists(config_path):
-        download_model()
+        download_model(model_path)
     else:
-        print(f"✅ Model cached at {MODEL_PATH}")
+        print(f"✅ Model cached at {model_path}")
     
     print("⏳ Loading pipeline...")
     
     from diffusers import LTX2Pipeline
     pipe = LTX2Pipeline.from_pretrained(
-        MODEL_PATH,
+        model_path,
         torch_dtype=torch.bfloat16,
         use_safetensors=True,
         local_files_only=True
@@ -149,7 +184,7 @@ def handler(event):
         input_audio_path = None
         
         if audio_url:
-            input_audio_path = tempfile.mktemp(suffix=".mp3", dir="/root/tmp")
+            input_audio_path = tempfile.mktemp(suffix=".mp3")
             temp_files.append(input_audio_path)
             download_audio(audio_url, input_audio_path)
             
@@ -176,7 +211,7 @@ def handler(event):
         
         print(f"✅ {gen_time:.1f}s")
         
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir="/root/tmp") as f:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             out_path = f.name
             temp_files.append(out_path)
             
