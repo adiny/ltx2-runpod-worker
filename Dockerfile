@@ -20,13 +20,15 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install ninja packaging wheel && \
     pip install git+https://github.com/huggingface/diffusers.git --no-cache-dir && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip cache purge
 
 # Create model directory
 RUN mkdir -p /models/.cache /models/LTX-2
 
-# Download LTX-2 model during build
-RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Lightricks/LTX-2', local_dir='/models/LTX-2', ignore_patterns=['*.md', '*.git*'])"
+# Download LTX-2 model - only essential files (fp8 variant ~5GB instead of full ~20GB)
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='Lightricks/LTX-2', local_dir='/models/LTX-2', allow_patterns=['*fp8*', '*.json', '*.txt', 'tokenizer*', 'scheduler*'])" && \
+    rm -rf /root/.cache/huggingface
 
 # Copy handler
 COPY handler.py /handler.py
