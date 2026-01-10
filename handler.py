@@ -1,4 +1,4 @@
-VERSION = "5.5.0-CUDA-DIRECT"
+VERSION = "5.6.0-CPU-OFFLOAD"
 
 import os
 import sys
@@ -125,6 +125,13 @@ def load_model():
     print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     print(f"PyTorch: {torch.__version__}")
     
+    # Check accelerate
+    try:
+        import accelerate
+        print(f"accelerate: {accelerate.__version__}")
+    except ImportError:
+        print("⚠️ accelerate not found!")
+    
     # Find best path
     base_path = find_best_path()
     model_path = os.path.join(base_path, "LTX-2")
@@ -140,7 +147,6 @@ def load_model():
     
     from diffusers import LTX2Pipeline
     
-    # Load with lower precision to save memory
     pipe = LTX2Pipeline.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
@@ -149,9 +155,9 @@ def load_model():
     )
     print("✅ Loaded LTX2Pipeline")
     
-    # Move to GPU directly
-    pipe.to("cuda")
-    print("✅ Ready on GPU!")
+    # Use CPU offload to save GPU memory
+    pipe.enable_model_cpu_offload()
+    print("✅ CPU offload enabled!")
     
     return pipe
 
@@ -166,10 +172,10 @@ def handler(event):
         if not prompt:
             return {"error": "Missing prompt"}
         
-        width = job_input.get("width", 704)  # Slightly smaller to save memory
+        width = job_input.get("width", 704)
         height = job_input.get("height", 480)
         fps = job_input.get("fps", 24)
-        num_frames = job_input.get("num_frames", 97)  # Fewer frames to save memory
+        num_frames = job_input.get("num_frames", 97)
         input_audio_path = None
         
         if audio_url:
@@ -180,13 +186,12 @@ def handler(event):
             duration = get_audio_duration(input_audio_path)
             calculated_frames = int(duration * fps) + 8
             calculated_frames = calculated_frames - (calculated_frames % 8) + 1
-            num_frames = min(calculated_frames, 161)  # Cap at ~6 seconds
+            num_frames = min(calculated_frames, 161)
 
         pipeline = load_model()
         
         print(f"🎬 {prompt[:50]}... ({width}x{height}, {num_frames}f)")
         
-        # Clear memory before generation
         torch.cuda.empty_cache()
         
         start = time.time()
@@ -214,7 +219,6 @@ def handler(event):
         with open(out_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
         
-        # Clear memory after generation
         torch.cuda.empty_cache()
         
         return {
