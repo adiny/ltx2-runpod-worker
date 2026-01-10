@@ -1,4 +1,4 @@
-VERSION = "4.1.0-CONTAINER-DISK"
+VERSION = "4.2.0-FULL-MODEL"
 
 import os
 import torch
@@ -10,7 +10,7 @@ import subprocess
 import soundfile as sf
 import requests
 
-# Use container disk for model storage (not network volume!)
+# Use container disk for model storage
 MODEL_DIR = "/workspace/models"
 MODEL_PATH = f"{MODEL_DIR}/LTX-2"
 CACHE_DIR = f"{MODEL_DIR}/.cache"
@@ -24,13 +24,11 @@ pipe = None
 
 
 def get_audio_duration(file_path):
-    """חישוב משך האודיו בשניות"""
     f = sf.SoundFile(file_path)
     return len(f) / f.samplerate
 
 
 def download_audio(url, save_path):
-    """הורדת קובץ אודיו מ-URL"""
     print(f"📥 Downloading audio from: {url}")
     response = requests.get(url, stream=True)
     if response.status_code == 200:
@@ -98,48 +96,27 @@ def load_model():
     total, used, free = shutil.disk_usage("/workspace")
     print(f"💾 Disk space: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
     
-    # Download model if not exists
+    # Download full model if not exists
     if not os.path.exists(os.path.join(MODEL_PATH, "config.json")):
-        print("📥 Downloading LTX-2 (fp8 variant)...")
+        print("📥 Downloading LTX-2 (full model)...")
         from huggingface_hub import snapshot_download
         snapshot_download(
             repo_id="Lightricks/LTX-2",
             local_dir=MODEL_PATH,
-            allow_patterns=["*fp8*", "*.json", "*.txt", "tokenizer*", "scheduler*"],
+            ignore_patterns=["*.md", "*.git*"],
         )
         print("✅ Download complete!")
     else:
         print(f"✅ Using cached model from {MODEL_PATH}")
     
     print("Loading pipeline...")
-    try:
-        from diffusers import LTXPipeline
-        pipe = LTXPipeline.from_pretrained(
-            MODEL_PATH,
-            torch_dtype=torch.bfloat16,
-            variant="fp8",
-            use_safetensors=True
-        )
-        print("✅ Loaded LTXPipeline (fp8)")
-    except Exception as e:
-        print(f"⚠️ fp8 failed: {e}, trying standard...")
-        try:
-            from diffusers import LTXPipeline
-            pipe = LTXPipeline.from_pretrained(
-                MODEL_PATH,
-                torch_dtype=torch.bfloat16,
-                use_safetensors=True
-            )
-            print("✅ Loaded LTXPipeline")
-        except Exception as e2:
-            print(f"⚠️ Fallback: {e2}")
-            from diffusers import DiffusionPipeline
-            pipe = DiffusionPipeline.from_pretrained(
-                MODEL_PATH,
-                torch_dtype=torch.bfloat16,
-                use_safetensors=True
-            )
-            print("✅ Loaded DiffusionPipeline")
+    from diffusers import LTXPipeline
+    pipe = LTXPipeline.from_pretrained(
+        MODEL_PATH,
+        torch_dtype=torch.bfloat16,
+        use_safetensors=True
+    )
+    print("✅ Loaded LTXPipeline")
 
     pipe.enable_model_cpu_offload()
     print("✅ Model ready!")
