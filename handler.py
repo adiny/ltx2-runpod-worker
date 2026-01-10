@@ -104,18 +104,29 @@ def load_model():
         pipe = LTXPipeline.from_pretrained(
             MODEL_PATH,
             torch_dtype=torch.bfloat16,
+            variant="fp8",
             use_safetensors=True
         )
-        print("✅ Loaded LTXPipeline")
+        print("✅ Loaded LTXPipeline (fp8)")
     except Exception as e:
-        print(f"⚠️ LTXPipeline failed: {e}")
-        from diffusers import DiffusionPipeline
-        pipe = DiffusionPipeline.from_pretrained(
-            MODEL_PATH,
-            torch_dtype=torch.bfloat16,
-            use_safetensors=True
-        )
-        print("✅ Loaded DiffusionPipeline (fallback)")
+        print(f"⚠️ LTXPipeline failed: {e}, trying without variant...")
+        try:
+            from diffusers import LTXPipeline
+            pipe = LTXPipeline.from_pretrained(
+                MODEL_PATH,
+                torch_dtype=torch.bfloat16,
+                use_safetensors=True
+            )
+            print("✅ Loaded LTXPipeline (standard)")
+        except Exception as e2:
+            print(f"⚠️ Fallback to DiffusionPipeline: {e2}")
+            from diffusers import DiffusionPipeline
+            pipe = DiffusionPipeline.from_pretrained(
+                MODEL_PATH,
+                torch_dtype=torch.bfloat16,
+                use_safetensors=True
+            )
+            print("✅ Loaded DiffusionPipeline (fallback)")
 
     pipe.enable_model_cpu_offload()
     print("✅ Model loaded and ready!")
