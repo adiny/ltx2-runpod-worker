@@ -11,9 +11,12 @@ RUN apt-get update --yes && \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+
+# Install accelerate FIRST, then verify it works
 RUN pip install --upgrade pip && \
     pip install ninja packaging wheel && \
-    pip install "accelerate>=1.0.0" --no-cache-dir && \
+    pip install "accelerate>=1.2.0" --no-cache-dir && \
+    python -c "import accelerate; print(f'accelerate {accelerate.__version__} installed')" && \
     pip install git+https://github.com/huggingface/diffusers.git --no-cache-dir && \
     pip install --no-cache-dir -r requirements.txt && \
     pip cache purge
