@@ -1,9 +1,7 @@
-VERSION = "5.2.0-LTX2-RETRY"
+VERSION = "5.3.0-LTX2-HFHUB"
 
 import os
 import sys
-import json
-import requests
 import torch
 import runpod
 import base64
@@ -11,143 +9,42 @@ import tempfile
 import time
 import subprocess
 import soundfile as sf
+import requests
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-MODEL_PATH = "/root/LTX-2"
+# Disable XET to avoid disk quota issues
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 os.environ["TMPDIR"] = "/root/tmp"
 os.environ["HF_HOME"] = "/root/hf_cache"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/root/hf_cache"
 
+MODEL_PATH = "/root/LTX-2"
 pipe = None
 HF_REPO = "Lightricks/LTX-2"
 
 
-def download_file(args, retries=3):
-    url, dest_path = args
-    for attempt in range(retries):
-        try:
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-            response = requests.get(url, stream=True, timeout=600)
-            response.raise_for_status()
-            
-            with open(dest_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024*1024):
-                    f.write(chunk)
-            
-            # Verify file is not empty
-            if os.path.getsize(dest_path) < 1000:
-                raise Exception(f"File too small: {os.path.getsize(dest_path)} bytes")
-            
-            return True, dest_path
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(2)
-                continue
-            return False, str(e)
-    return False, "Max retries exceeded"
-
-
-def get_all_files(path=""):
-    url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main"
-    if path:
-        url = f"{url}/{path}"
+def download_model():
+    """Download model using huggingface_hub"""
+    print(f"📥 Downloading {HF_REPO} using huggingface_hub...")
     
-    try:
-        resp = requests.get(url, timeout=30)
-        if resp.status_code != 200:
-            return []
-    except:
-        return []
+    os.makedirs("/root/tmp", exist_ok=True)
+    os.makedirs("/root/hf_cache", exist_ok=True)
+    os.makedirs(MODEL_PATH, exist_ok=True)
     
-    files = []
-    for item in resp.json():
-        if item['type'] == 'file':
-            if not item['path'].endswith('.md') and '.git' not in item['path']:
-                files.append(item['path'])
-        elif item['type'] == 'directory':
-            files.extend(get_all_files(item['path']))
-    return files
-
-
-def download_model_parallel():
-    print(f"📥 Getting file list from {HF_REPO}...")
+    from huggingface_hub import snapshot_download
     
-    files = get_all_files()
-    print(f"   Found {len(files)} files")
+    snapshot_download(
+        repo_id=HF_REPO,
+        local_dir=MODEL_PATH,
+        cache_dir="/root/hf_cache",
+        ignore_patterns=["*.md", "*.git*", "*.mp4"],
+        local_dir_use_symlinks=False,
+        resume_download=True,
+        max_workers=4,
+    )
     
-    base_url = f"https://huggingface.co/{HF_REPO}/resolve/main"
-    downloads = []
-    
-    for file_path in files:
-        dest = os.path.join(MODEL_PATH, file_path)
-        # Re-download if file doesn't exist OR is too small (corrupted)
-        if not os.path.exists(dest) or os.path.getsize(dest) < 1000:
-            if os.path.exists(dest):
-                os.remove(dest)  # Remove corrupted file
-            url = f"{base_url}/{file_path}"
-            downloads.append((url, dest))
-    
-    if not downloads:
-        print("   All files already downloaded!")
-        return True
-    
-    print(f"   Downloading {len(downloads)} files in parallel...")
-    
-    completed = 0
-    failed = 0
-    failed_files = []
-    
-    with ThreadPoolExecutor(max_workers=5) as executor:  # Reduced workers for stability
-        futures = {executor.submit(download_file, args): args for args in downloads}
-        
-        for future in as_completed(futures):
-            args = futures[future]
-            success, result = future.result()
-            if success:
-                completed += 1
-            else:
-                failed += 1
-                failed_files.append(args[1])
-            
-            if completed % 10 == 0:
-                print(f"   Progress: {completed}/{len(downloads)}")
-    
-    print(f"✅ Download complete! ({completed} ok, {failed} failed)")
-    
-    if failed > 0:
-        print(f"⚠️ Failed files: {failed_files}")
-        return False
-    return True
-
-
-def verify_model():
-    """Verify all critical model files exist and are valid"""
-    critical_files = [
-        "config.json",
-        "transformer/config.json",
-        "text_encoder/config.json",
-        "vae/config.json",
-    ]
-    
-    for f in critical_files:
-        path = os.path.join(MODEL_PATH, f)
-        if not os.path.exists(path):
-            print(f"❌ Missing: {f}")
-            return False
-    
-    # Check transformer shards
-    for i in range(1, 9):
-        shard = f"transformer/diffusion_pytorch_model-{i:05d}-of-00008.safetensors"
-        path = os.path.join(MODEL_PATH, shard)
-        if not os.path.exists(path):
-            print(f"❌ Missing shard: {shard}")
-            return False
-        if os.path.getsize(path) < 1000000:  # Less than 1MB is suspicious
-            print(f"❌ Corrupted shard: {shard} ({os.path.getsize(path)} bytes)")
-            os.remove(path)
-            return False
-    
-    return True
+    print("✅ Download complete!")
 
 
 def get_audio_duration(file_path):
@@ -212,21 +109,12 @@ def load_model():
         except:
             pass
     
-    os.makedirs("/root/tmp", exist_ok=True)
-    os.makedirs(MODEL_PATH, exist_ok=True)
-    
-    # Download and verify model
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        if not verify_model():
-            print(f"📥 Download attempt {attempt + 1}/{max_attempts}...")
-            download_model_parallel()
-        else:
-            print("✅ Model verified!")
-            break
-    
-    if not verify_model():
-        raise RuntimeError("Failed to download model after multiple attempts")
+    # Download model if needed
+    config_path = os.path.join(MODEL_PATH, "model_index.json")
+    if not os.path.exists(config_path):
+        download_model()
+    else:
+        print(f"✅ Model cached at {MODEL_PATH}")
     
     print("⏳ Loading pipeline...")
     
