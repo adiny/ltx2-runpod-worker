@@ -13,9 +13,10 @@ RUN apt-get update --yes && \
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install ninja packaging wheel && \
-    pip install accelerate>=1.0.0 && \
+    pip install "accelerate>=1.0.0" --no-cache-dir && \
     pip install git+https://github.com/huggingface/diffusers.git --no-cache-dir && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip cache purge
 
 COPY handler.py /handler.py
 
