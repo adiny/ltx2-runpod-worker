@@ -1,8 +1,8 @@
-name: Build and Push LTX-2 Worker
+name: Build and Push to Docker Hub
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # שלב חדש - לפנות מקום בדיסק! (מוסיף ~30GB)
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Aggressive disk cleanup - free up ~30GB
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -19,11 +22,11 @@ jobs:
           dotnet: true
           haskell: true
           large-packages: true
-          docker-images: false
+          docker-images: true
           swap-storage: true
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Check disk space
+        run: df -h
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,10 +41,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
           push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/ltx2-worker:latest
-            ${{ secrets.DOCKER_USERNAME }}/ltx2-worker:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: yarivadin/ltx2-worker:latest
+          no-cache: true
+          build-args: |
+            BUILDKIT_STEP_LOG_MAX_SIZE=10485760
