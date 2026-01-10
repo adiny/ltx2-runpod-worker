@@ -1,4 +1,4 @@
-VERSION = "4.0.0-BAKED-AUDIO-SYNC"
+VERSION = "4.1.0-CONTAINER-DISK"
 
 import os
 import torch
@@ -10,12 +10,17 @@ import subprocess
 import soundfile as sf
 import requests
 
-# Model is baked into the image at /models
-os.environ["HF_HOME"] = "/models/.cache"
-os.environ["HUGGINGFACE_HUB_CACHE"] = "/models/.cache"
+# Use container disk for model storage (not network volume!)
+MODEL_DIR = "/workspace/models"
+MODEL_PATH = f"{MODEL_DIR}/LTX-2"
+CACHE_DIR = f"{MODEL_DIR}/.cache"
+
+os.environ["HF_HOME"] = CACHE_DIR
+os.environ["HUGGINGFACE_HUB_CACHE"] = CACHE_DIR
+os.environ["TMPDIR"] = "/workspace/tmp"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
 pipe = None
-MODEL_PATH = "/models/LTX-2"
 
 
 def get_audio_duration(file_path):
@@ -37,27 +42,21 @@ def download_audio(url, save_path):
 
 
 def save_final_output(video_frames, input_audio_path, generated_audio_waveform, output_path, fps=24):
-    """
-    איחוד חכם:
-    1. אם יש אודיו מהמשתמש (input_audio) -> הוא המלך. משתמשים בו.
-    2. אם אין, משתמשים באודיו של LTX (אם יש).
-    """
     from diffusers.utils import export_to_video
     
     temp_video = output_path.replace(".mp4", "_visual.mp4")
     temp_audio = None
     
-    # שמירת הוידאו
     export_to_video(video_frames, temp_video, fps=fps)
     
     ffmpeg_cmd = ["ffmpeg", "-y", "-i", temp_video]
     
     if input_audio_path and os.path.exists(input_audio_path):
-        print("🎵 Merging USER audio (High Priority)...")
+        print("🎵 Merging USER audio...")
         ffmpeg_cmd.extend(["-i", input_audio_path, "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest"])
         
     elif generated_audio_waveform is not None:
-        print("🎵 Merging GENERATED audio (Low Priority)...")
+        print("🎵 Merging GENERATED audio...")
         temp_audio = output_path.replace(".mp4", ".wav")
         if torch.is_tensor(generated_audio_waveform):
             generated_audio_waveform = generated_audio_waveform.cpu().float().numpy()
@@ -66,16 +65,13 @@ def save_final_output(video_frames, input_audio_path, generated_audio_waveform, 
         sf.write(temp_audio, generated_audio_waveform, 24000)
         ffmpeg_cmd.extend(["-i", temp_audio, "-c:v", "copy", "-c:a", "aac", "-shortest"])
     else:
-        print("🔇 No audio source. Creating silent video.")
+        print("🔇 No audio source.")
         os.rename(temp_video, output_path)
         return
 
     ffmpeg_cmd.extend(["-strict", "experimental", output_path])
-    
-    # הרצת FFmpeg
     subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    # ניקוי
     if os.path.exists(temp_video):
         os.remove(temp_video)
     if temp_audio and os.path.exists(temp_audio):
@@ -92,11 +88,28 @@ def load_model():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
-    # Model is already in the image - no download needed!
-    print(f"📦 Loading model from {MODEL_PATH}")
+    # Create directories
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs("/workspace/tmp", exist_ok=True)
     
+    # Check disk space
+    import shutil
+    total, used, free = shutil.disk_usage("/workspace")
+    print(f"💾 Disk space: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
+    
+    # Download model if not exists
     if not os.path.exists(os.path.join(MODEL_PATH, "config.json")):
-        raise RuntimeError(f"Model not found at {MODEL_PATH}! Image was not built correctly.")
+        print("📥 Downloading LTX-2 (fp8 variant)...")
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id="Lightricks/LTX-2",
+            local_dir=MODEL_PATH,
+            allow_patterns=["*fp8*", "*.json", "*.txt", "tokenizer*", "scheduler*"],
+        )
+        print("✅ Download complete!")
+    else:
+        print(f"✅ Using cached model from {MODEL_PATH}")
     
     print("Loading pipeline...")
     try:
@@ -109,7 +122,7 @@ def load_model():
         )
         print("✅ Loaded LTXPipeline (fp8)")
     except Exception as e:
-        print(f"⚠️ LTXPipeline failed: {e}, trying without variant...")
+        print(f"⚠️ fp8 failed: {e}, trying standard...")
         try:
             from diffusers import LTXPipeline
             pipe = LTXPipeline.from_pretrained(
@@ -117,19 +130,19 @@ def load_model():
                 torch_dtype=torch.bfloat16,
                 use_safetensors=True
             )
-            print("✅ Loaded LTXPipeline (standard)")
+            print("✅ Loaded LTXPipeline")
         except Exception as e2:
-            print(f"⚠️ Fallback to DiffusionPipeline: {e2}")
+            print(f"⚠️ Fallback: {e2}")
             from diffusers import DiffusionPipeline
             pipe = DiffusionPipeline.from_pretrained(
                 MODEL_PATH,
                 torch_dtype=torch.bfloat16,
                 use_safetensors=True
             )
-            print("✅ Loaded DiffusionPipeline (fallback)")
+            print("✅ Loaded DiffusionPipeline")
 
     pipe.enable_model_cpu_offload()
-    print("✅ Model loaded and ready!")
+    print("✅ Model ready!")
     return pipe
 
 
@@ -146,30 +159,25 @@ def handler(event):
         width = job_input.get("width", 768)
         height = job_input.get("height", 512)
         fps = job_input.get("fps", 24)
-        
-        # חישוב פריימים חכם
         num_frames = job_input.get("num_frames", 121)
         input_audio_path = None
         
         if audio_url:
-            # אם יש URL, מורידים ומחשבים אורך
             input_audio_path = tempfile.mktemp(suffix=".mp3")
             temp_files.append(input_audio_path)
             download_audio(audio_url, input_audio_path)
             
             duration = get_audio_duration(input_audio_path)
             calculated_frames = int(duration * fps) + 8
-            
-            # LTX-2 עובד בקפיצות מסוימות (מודולו 8)
             calculated_frames = calculated_frames - (calculated_frames % 8) + 1
             
-            print(f"🎙️ Audio input detected: {duration:.2f}s -> Setting frames to {calculated_frames}")
+            print(f"🎙️ Audio: {duration:.2f}s -> {calculated_frames} frames")
             num_frames = min(calculated_frames, 257)
 
         pipeline = load_model()
         
         print(f"🎬 Generating: {prompt[:50]}...")
-        print(f"Settings: {width}x{height}, {num_frames} frames, {fps} fps")
+        print(f"Settings: {width}x{height}, {num_frames} frames")
         
         start = time.time()
         output = pipeline(
@@ -183,15 +191,13 @@ def handler(event):
         )
         gen_time = time.time() - start
         
-        print(f"✅ Generation done in {gen_time:.1f}s")
+        print(f"✅ Done in {gen_time:.1f}s")
         
-        # שמירה ואיחוד
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             out_path = f.name
             temp_files.append(out_path)
             
         generated_audio = output.audio[0] if hasattr(output, 'audio') and output.audio is not None else None
-        
         save_final_output(output.frames[0], input_audio_path, generated_audio, out_path, fps)
         
         with open(out_path, "rb") as f:
@@ -211,7 +217,6 @@ def handler(event):
         print(f"❌ {e}\n{traceback.format_exc()}")
         return {"error": str(e), "traceback": traceback.format_exc()}
     finally:
-        # ניקוי קבצים
         for f in temp_files:
             if f and os.path.exists(f):
                 os.remove(f)
