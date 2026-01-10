@@ -1,4 +1,4 @@
-VERSION = "5.0.0-LTX2-CUDA"
+VERSION = "5.1.0-LTX2-OFFLOAD"
 
 import os
 import sys
@@ -179,9 +179,9 @@ def load_model():
     )
     print("✅ Loaded LTX2Pipeline")
     
-    # Move to GPU
-    pipe.to("cuda")
-    print("✅ Ready on GPU!")
+    # Use CPU offload to save GPU memory
+    pipe.enable_model_cpu_offload()
+    print("✅ Ready with CPU offload!")
     return pipe
 
 
