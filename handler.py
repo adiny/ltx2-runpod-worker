@@ -1,18 +1,17 @@
-VERSION = "4.4.0-FIXED-CACHE"
+VERSION = "4.5.0-NO-XET"
 
 import os
 import sys
 
-# Set ALL cache/temp directories BEFORE any imports
-os.environ["HF_HOME"] = "/tmp/hf_cache"
-os.environ["HUGGINGFACE_HUB_CACHE"] = "/tmp/hf_cache"
-os.environ["HF_HUB_CACHE"] = "/tmp/hf_cache"
-os.environ["TRANSFORMERS_CACHE"] = "/tmp/hf_cache"
-os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
-os.environ["TMPDIR"] = "/tmp"
-os.environ["TEMP"] = "/tmp"
-os.environ["TMP"] = "/tmp"
+# CRITICAL: Disable XET storage (causes disk quota issues)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+os.environ["HF_HUB_DISABLE_XET"] = "1"
+
+# Set cache directories
+os.environ["HF_HOME"] = "/tmp/hf_home"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/tmp/hf_home"
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/hf_home"
+os.environ["TMPDIR"] = "/tmp"
 
 import torch
 import runpod
@@ -25,7 +24,6 @@ import requests
 import shutil
 
 MODEL_PATH = "/tmp/LTX-2"
-
 pipe = None
 
 
@@ -58,7 +56,6 @@ def save_final_output(video_frames, input_audio_path, generated_audio_waveform, 
     if input_audio_path and os.path.exists(input_audio_path):
         print("🎵 Merging USER audio...")
         ffmpeg_cmd.extend(["-i", input_audio_path, "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest"])
-        
     elif generated_audio_waveform is not None:
         print("🎵 Merging GENERATED audio...")
         temp_audio = output_path.replace(".mp4", ".wav")
@@ -93,51 +90,50 @@ def load_model():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
     # Check disk space
-    print("💾 Checking disk space...")
+    print("💾 Disk space:")
     for path in ["/", "/tmp"]:
         try:
             total, used, free = shutil.disk_usage(path)
-            print(f"   {path}: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
-        except Exception as e:
-            print(f"   {path}: Error - {e}")
+            print(f"   {path}: {free // (1024**3)}GB free / {total // (1024**3)}GB total")
+        except:
+            pass
     
-    # Create cache directory
-    os.makedirs("/tmp/hf_cache", exist_ok=True)
+    os.makedirs("/tmp/hf_home", exist_ok=True)
     
-    # Download model if not exists
     config_path = os.path.join(MODEL_PATH, "config.json")
     if not os.path.exists(config_path):
-        print("📥 Downloading LTX-2...")
+        print("📥 Downloading LTX-2 (XET disabled)...")
+        
         from huggingface_hub import snapshot_download
+        
+        # Force disable XET at runtime too
+        try:
+            import huggingface_hub
+            huggingface_hub.constants.HF_HUB_DISABLE_XET = True
+        except:
+            pass
         
         snapshot_download(
             repo_id="Lightricks/LTX-2",
             local_dir=MODEL_PATH,
-            cache_dir="/tmp/hf_cache",
+            cache_dir="/tmp/hf_home",
             ignore_patterns=["*.md", "*.git*"],
             local_dir_use_symlinks=False,
+            resume_download=True,
         )
         print("✅ Download complete!")
-        
-        # Clean up cache to free space
-        cache_path = "/tmp/hf_cache"
-        if os.path.exists(cache_path):
-            shutil.rmtree(cache_path, ignore_errors=True)
-            print("🧹 Cleaned up download cache")
     else:
-        print(f"✅ Using cached model from {MODEL_PATH}")
+        print(f"✅ Model cached at {MODEL_PATH}")
     
-    print("Loading pipeline...")
+    print("⏳ Loading pipeline...")
     from diffusers import LTXPipeline
     pipe = LTXPipeline.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
         use_safetensors=True
     )
-    print("✅ Loaded LTXPipeline")
-
     pipe.enable_model_cpu_offload()
-    print("✅ Model ready!")
+    print("✅ Ready!")
     return pipe
 
 
@@ -172,7 +168,7 @@ def handler(event):
         pipeline = load_model()
         
         print(f"🎬 Generating: {prompt[:50]}...")
-        print(f"Settings: {width}x{height}, {num_frames} frames")
+        print(f"   {width}x{height}, {num_frames} frames")
         
         start = time.time()
         output = pipeline(
