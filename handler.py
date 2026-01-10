@@ -1,4 +1,4 @@
-VERSION = "4.2.0-FULL-MODEL"
+VERSION = "4.3.0-ROOT-DISK"
 
 import os
 import torch
@@ -9,15 +9,19 @@ import time
 import subprocess
 import soundfile as sf
 import requests
+import shutil
 
-# Use container disk for model storage
-MODEL_DIR = "/workspace/models"
+# Use root filesystem for model storage (container disk)
+MODEL_DIR = "/opt/models"
 MODEL_PATH = f"{MODEL_DIR}/LTX-2"
 CACHE_DIR = f"{MODEL_DIR}/.cache"
+TMP_DIR = "/opt/tmp"
 
 os.environ["HF_HOME"] = CACHE_DIR
 os.environ["HUGGINGFACE_HUB_CACHE"] = CACHE_DIR
-os.environ["TMPDIR"] = "/workspace/tmp"
+os.environ["TMPDIR"] = TMP_DIR
+os.environ["TEMP"] = TMP_DIR
+os.environ["TMP"] = TMP_DIR
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
 pipe = None
@@ -89,12 +93,16 @@ def load_model():
     # Create directories
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
-    os.makedirs("/workspace/tmp", exist_ok=True)
+    os.makedirs(TMP_DIR, exist_ok=True)
     
-    # Check disk space
-    import shutil
-    total, used, free = shutil.disk_usage("/workspace")
-    print(f"💾 Disk space: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
+    # Check disk space on different paths
+    print("💾 Checking disk space...")
+    for path in ["/", "/opt", "/workspace", "/tmp"]:
+        try:
+            total, used, free = shutil.disk_usage(path)
+            print(f"   {path}: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
+        except:
+            print(f"   {path}: N/A")
     
     # Download full model if not exists
     if not os.path.exists(os.path.join(MODEL_PATH, "config.json")):
@@ -140,7 +148,7 @@ def handler(event):
         input_audio_path = None
         
         if audio_url:
-            input_audio_path = tempfile.mktemp(suffix=".mp3")
+            input_audio_path = tempfile.mktemp(suffix=".mp3", dir=TMP_DIR)
             temp_files.append(input_audio_path)
             download_audio(audio_url, input_audio_path)
             
@@ -170,7 +178,7 @@ def handler(event):
         
         print(f"✅ Done in {gen_time:.1f}s")
         
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir=TMP_DIR) as f:
             out_path = f.name
             temp_files.append(out_path)
             
