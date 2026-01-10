@@ -1,6 +1,19 @@
-VERSION = "4.3.0-ROOT-DISK"
+VERSION = "4.4.0-FIXED-CACHE"
 
 import os
+import sys
+
+# Set ALL cache/temp directories BEFORE any imports
+os.environ["HF_HOME"] = "/tmp/hf_cache"
+os.environ["HUGGINGFACE_HUB_CACHE"] = "/tmp/hf_cache"
+os.environ["HF_HUB_CACHE"] = "/tmp/hf_cache"
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/hf_cache"
+os.environ["XDG_CACHE_HOME"] = "/tmp/cache"
+os.environ["TMPDIR"] = "/tmp"
+os.environ["TEMP"] = "/tmp"
+os.environ["TMP"] = "/tmp"
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
 import torch
 import runpod
 import base64
@@ -11,18 +24,7 @@ import soundfile as sf
 import requests
 import shutil
 
-# Use root filesystem for model storage (container disk)
-MODEL_DIR = "/opt/models"
-MODEL_PATH = f"{MODEL_DIR}/LTX-2"
-CACHE_DIR = f"{MODEL_DIR}/.cache"
-TMP_DIR = "/opt/tmp"
-
-os.environ["HF_HOME"] = CACHE_DIR
-os.environ["HUGGINGFACE_HUB_CACHE"] = CACHE_DIR
-os.environ["TMPDIR"] = TMP_DIR
-os.environ["TEMP"] = TMP_DIR
-os.environ["TMP"] = TMP_DIR
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+MODEL_PATH = "/tmp/LTX-2"
 
 pipe = None
 
@@ -90,30 +92,38 @@ def load_model():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
-    # Create directories
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    os.makedirs(TMP_DIR, exist_ok=True)
-    
-    # Check disk space on different paths
+    # Check disk space
     print("💾 Checking disk space...")
-    for path in ["/", "/opt", "/workspace", "/tmp"]:
+    for path in ["/", "/tmp"]:
         try:
             total, used, free = shutil.disk_usage(path)
             print(f"   {path}: {free // (1024**3)} GB free / {total // (1024**3)} GB total")
-        except:
-            print(f"   {path}: N/A")
+        except Exception as e:
+            print(f"   {path}: Error - {e}")
     
-    # Download full model if not exists
-    if not os.path.exists(os.path.join(MODEL_PATH, "config.json")):
-        print("📥 Downloading LTX-2 (full model)...")
+    # Create cache directory
+    os.makedirs("/tmp/hf_cache", exist_ok=True)
+    
+    # Download model if not exists
+    config_path = os.path.join(MODEL_PATH, "config.json")
+    if not os.path.exists(config_path):
+        print("📥 Downloading LTX-2...")
         from huggingface_hub import snapshot_download
+        
         snapshot_download(
             repo_id="Lightricks/LTX-2",
             local_dir=MODEL_PATH,
+            cache_dir="/tmp/hf_cache",
             ignore_patterns=["*.md", "*.git*"],
+            local_dir_use_symlinks=False,
         )
         print("✅ Download complete!")
+        
+        # Clean up cache to free space
+        cache_path = "/tmp/hf_cache"
+        if os.path.exists(cache_path):
+            shutil.rmtree(cache_path, ignore_errors=True)
+            print("🧹 Cleaned up download cache")
     else:
         print(f"✅ Using cached model from {MODEL_PATH}")
     
@@ -148,7 +158,7 @@ def handler(event):
         input_audio_path = None
         
         if audio_url:
-            input_audio_path = tempfile.mktemp(suffix=".mp3", dir=TMP_DIR)
+            input_audio_path = tempfile.mktemp(suffix=".mp3")
             temp_files.append(input_audio_path)
             download_audio(audio_url, input_audio_path)
             
@@ -178,7 +188,7 @@ def handler(event):
         
         print(f"✅ Done in {gen_time:.1f}s")
         
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir=TMP_DIR) as f:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
             out_path = f.name
             temp_files.append(out_path)
             
