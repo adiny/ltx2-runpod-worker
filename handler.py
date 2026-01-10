@@ -1,4 +1,4 @@
-VERSION = "4.8.0-LTX2-PIPELINE"
+VERSION = "5.0.0-LTX2-CUDA"
 
 import os
 import sys
@@ -170,30 +170,18 @@ def load_model():
     
     print("⏳ Loading pipeline...")
     
-    # Use LTX2Pipeline for LTX-2 model!
-    try:
-        from diffusers import LTX2Pipeline
-        pipe = LTX2Pipeline.from_pretrained(
-            MODEL_PATH,
-            torch_dtype=torch.bfloat16,
-            use_safetensors=True,
-            local_files_only=True
-        )
-        print("✅ Loaded LTX2Pipeline")
-    except ImportError:
-        print("⚠️ LTX2Pipeline not found, trying DiffusionPipeline...")
-        from diffusers import DiffusionPipeline
-        pipe = DiffusionPipeline.from_pretrained(
-            MODEL_PATH,
-            torch_dtype=torch.bfloat16,
-            use_safetensors=True,
-            local_files_only=True,
-            trust_remote_code=True
-        )
-        print("✅ Loaded DiffusionPipeline")
+    from diffusers import LTX2Pipeline
+    pipe = LTX2Pipeline.from_pretrained(
+        MODEL_PATH,
+        torch_dtype=torch.bfloat16,
+        use_safetensors=True,
+        local_files_only=True
+    )
+    print("✅ Loaded LTX2Pipeline")
     
-    pipe.enable_model_cpu_offload()
-    print("✅ Ready!")
+    # Move to GPU
+    pipe.to("cuda")
+    print("✅ Ready on GPU!")
     return pipe
 
 
