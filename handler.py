@@ -1,18 +1,9 @@
-VERSION = "4.5.0-NO-XET"
+VERSION = "4.6.0-DIRECT-DOWNLOAD"
 
 import os
 import sys
-
-# CRITICAL: Disable XET storage (causes disk quota issues)
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-os.environ["HF_HUB_DISABLE_XET"] = "1"
-
-# Set cache directories
-os.environ["HF_HOME"] = "/tmp/hf_home"
-os.environ["HUGGINGFACE_HUB_CACHE"] = "/tmp/hf_home"
-os.environ["TRANSFORMERS_CACHE"] = "/tmp/hf_home"
-os.environ["TMPDIR"] = "/tmp"
-
+import json
+import requests
 import torch
 import runpod
 import base64
@@ -20,11 +11,84 @@ import tempfile
 import time
 import subprocess
 import soundfile as sf
-import requests
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
-MODEL_PATH = "/tmp/LTX-2"
+# Use overlay filesystem which should have more space
+MODEL_PATH = "/root/LTX-2"
+os.environ["TMPDIR"] = "/root/tmp"
+os.environ["HF_HOME"] = "/root/hf_cache"
+
 pipe = None
+HF_REPO = "Lightricks/LTX-2"
+HF_API = "https://huggingface.co/api/models"
+
+
+def download_file(url, dest_path, desc=""):
+    """Download a single file with progress"""
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    
+    response = requests.get(url, stream=True)
+    total = int(response.headers.get('content-length', 0))
+    
+    with open(dest_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+    
+    return dest_path
+
+
+def download_model_direct():
+    """Download model files directly from Hugging Face"""
+    print(f"📥 Downloading {HF_REPO} directly...")
+    
+    # Get file list from HF API
+    api_url = f"{HF_API}/{HF_REPO}"
+    response = requests.get(api_url)
+    
+    if response.status_code != 200:
+        raise Exception(f"Failed to get model info: {response.status_code}")
+    
+    # Get siblings (files)
+    tree_url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main"
+    
+    def get_all_files(path=""):
+        url = f"https://huggingface.co/api/models/{HF_REPO}/tree/main/{path}" if path else tree_url
+        resp = requests.get(url)
+        if resp.status_code != 200:
+            return []
+        
+        files = []
+        for item in resp.json():
+            if item['type'] == 'file':
+                if not item['path'].endswith('.md') and '.git' not in item['path']:
+                    files.append(item['path'])
+            elif item['type'] == 'directory':
+                files.extend(get_all_files(item['path']))
+        return files
+    
+    files = get_all_files()
+    print(f"   Found {len(files)} files to download")
+    
+    # Download each file
+    base_url = f"https://huggingface.co/{HF_REPO}/resolve/main"
+    
+    for i, file_path in enumerate(files):
+        dest = os.path.join(MODEL_PATH, file_path)
+        
+        if os.path.exists(dest):
+            continue
+            
+        url = f"{base_url}/{file_path}"
+        print(f"   [{i+1}/{len(files)}] {file_path}")
+        
+        try:
+            download_file(url, dest)
+        except Exception as e:
+            print(f"   ⚠️ Failed: {e}")
+    
+    print("✅ Download complete!")
 
 
 def get_audio_duration(file_path):
@@ -89,39 +153,22 @@ def load_model():
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     
-    # Check disk space
+    # Check disk space on all paths
     print("💾 Disk space:")
-    for path in ["/", "/tmp"]:
+    for path in ["/", "/tmp", "/root", "/workspace"]:
         try:
             total, used, free = shutil.disk_usage(path)
             print(f"   {path}: {free // (1024**3)}GB free / {total // (1024**3)}GB total")
         except:
-            pass
+            print(f"   {path}: N/A")
     
-    os.makedirs("/tmp/hf_home", exist_ok=True)
+    os.makedirs("/root/tmp", exist_ok=True)
+    os.makedirs("/root/hf_cache", exist_ok=True)
+    os.makedirs(MODEL_PATH, exist_ok=True)
     
     config_path = os.path.join(MODEL_PATH, "config.json")
     if not os.path.exists(config_path):
-        print("📥 Downloading LTX-2 (XET disabled)...")
-        
-        from huggingface_hub import snapshot_download
-        
-        # Force disable XET at runtime too
-        try:
-            import huggingface_hub
-            huggingface_hub.constants.HF_HUB_DISABLE_XET = True
-        except:
-            pass
-        
-        snapshot_download(
-            repo_id="Lightricks/LTX-2",
-            local_dir=MODEL_PATH,
-            cache_dir="/tmp/hf_home",
-            ignore_patterns=["*.md", "*.git*"],
-            local_dir_use_symlinks=False,
-            resume_download=True,
-        )
-        print("✅ Download complete!")
+        download_model_direct()
     else:
         print(f"✅ Model cached at {MODEL_PATH}")
     
@@ -130,7 +177,8 @@ def load_model():
     pipe = LTXPipeline.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
-        use_safetensors=True
+        use_safetensors=True,
+        local_files_only=True
     )
     pipe.enable_model_cpu_offload()
     print("✅ Ready!")
@@ -154,7 +202,7 @@ def handler(event):
         input_audio_path = None
         
         if audio_url:
-            input_audio_path = tempfile.mktemp(suffix=".mp3")
+            input_audio_path = tempfile.mktemp(suffix=".mp3", dir="/root/tmp")
             temp_files.append(input_audio_path)
             download_audio(audio_url, input_audio_path)
             
@@ -184,7 +232,7 @@ def handler(event):
         
         print(f"✅ Done in {gen_time:.1f}s")
         
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False, dir="/root/tmp") as f:
             out_path = f.name
             temp_files.append(out_path)
             
