@@ -1,4 +1,4 @@
-VERSION = "5.8.0-OPTIMIZED"
+VERSION = "5.9.0-NO-WARMUP"
 
 import os
 import sys
@@ -251,9 +251,9 @@ def load_model():
     )
     print("✅ Loaded LTX2Pipeline")
     
-    # Use CPU offload to save GPU memory
-    pipe.enable_model_cpu_offload()
-    print("✅ CPU offload enabled!")
+    # Use sequential CPU offload for maximum memory savings
+    pipe.enable_sequential_cpu_offload()
+    print("✅ Sequential CPU offload enabled!")
     
     # Clear memory after loading
     clear_memory()
@@ -263,30 +263,24 @@ def load_model():
 
 
 def warmup_model():
-    """Run a tiny inference to warm up the model"""
+    """Clear memory and prepare for inference - no actual warmup to save VRAM"""
     global pipe
     
-    print("🔥 Warming up model...")
-    start = time.time()
+    print("🔥 Preparing model (no warmup to save VRAM)...")
     
-    try:
-        with torch.inference_mode():
-            # Minimal generation just to initialize CUDA kernels
-            _ = pipe(
-                prompt="test",
-                negative_prompt="",
-                width=256,
-                height=256,
-                num_frames=9,  # Minimum frames
-                num_inference_steps=1,  # Single step
-                output_type="pt"
-            )
-        clear_memory()
-        print(f"✅ Warmup complete in {time.time() - start:.1f}s")
-        print(f"Memory after warmup: {get_memory_info()}")
-    except Exception as e:
-        print(f"⚠️ Warmup failed (non-critical): {e}")
-        clear_memory()
+    # Just clear memory aggressively
+    clear_memory()
+    
+    # Force garbage collection
+    import gc
+    gc.collect()
+    gc.collect()
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+    
+    print(f"✅ Ready! Memory: {get_memory_info()}")
 
 
 def handler(event):
