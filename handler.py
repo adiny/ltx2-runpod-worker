@@ -1,4 +1,4 @@
-VERSION = "5.10.0-80GB"
+VERSION = "5.11.0-80GB"
 
 import os
 import sys
@@ -172,9 +172,23 @@ def download_audio(url, save_path):
 
 def save_final_output(video_frames, input_audio_path, generated_audio_waveform, output_path, fps=24):
     from diffusers.utils import export_to_video
+    import numpy as np
     
     temp_video = output_path.replace(".mp4", "_visual.mp4")
     temp_audio = None
+    
+    # Convert frames to proper format if needed
+    if torch.is_tensor(video_frames):
+        # Convert from tensor to numpy
+        video_frames = video_frames.cpu().numpy()
+    
+    # If frames are in format (frames, channels, height, width), convert to (frames, height, width, channels)
+    if isinstance(video_frames, np.ndarray) and video_frames.ndim == 4:
+        if video_frames.shape[1] in [1, 3, 4]:  # channels first
+            video_frames = np.transpose(video_frames, (0, 2, 3, 1))
+        # Convert to uint8 if float
+        if video_frames.dtype in [np.float32, np.float64]:
+            video_frames = (video_frames * 255).clip(0, 255).astype(np.uint8)
     
     export_to_video(video_frames, temp_video, fps=fps)
     
