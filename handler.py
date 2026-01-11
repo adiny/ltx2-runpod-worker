@@ -1,4 +1,4 @@
-VERSION = "5.7.0-OPTIMIZED"
+VERSION = "5.8.0-OPTIMIZED"
 
 import os
 import sys
@@ -77,9 +77,63 @@ def find_best_path():
     return best_path
 
 
+def is_model_valid(model_path):
+    """Check if model files are complete and valid"""
+    required_files = [
+        "model_index.json",
+        "scheduler/scheduler_config.json",
+        "text_encoder/config.json",
+        "tokenizer/tokenizer.model",
+        "transformer/config.json",
+        "vae/config.json",
+    ]
+    
+    # Check for at least one safetensors file in key directories
+    safetensor_dirs = ["text_encoder", "transformer", "vae"]
+    
+    print("🔍 Validating model files...")
+    
+    for f in required_files:
+        full_path = os.path.join(model_path, f)
+        if not os.path.exists(full_path):
+            print(f"   ❌ Missing: {f}")
+            return False
+        # Check file is not empty
+        if os.path.getsize(full_path) == 0:
+            print(f"   ❌ Empty file: {f}")
+            return False
+    
+    for dir_name in safetensor_dirs:
+        dir_path = os.path.join(model_path, dir_name)
+        if not os.path.exists(dir_path):
+            print(f"   ❌ Missing directory: {dir_name}")
+            return False
+        
+        # Check for safetensors files
+        safetensor_files = [f for f in os.listdir(dir_path) if f.endswith('.safetensors')]
+        if not safetensor_files:
+            print(f"   ❌ No safetensors in: {dir_name}")
+            return False
+        
+        # Check safetensors files are not empty/corrupted (at least 1KB)
+        for sf_file in safetensor_files:
+            sf_path = os.path.join(dir_path, sf_file)
+            if os.path.getsize(sf_path) < 1024:
+                print(f"   ❌ Corrupted file: {dir_name}/{sf_file}")
+                return False
+    
+    print("   ✅ All model files valid")
+    return True
+
+
 def download_model(model_path):
     """Download model using huggingface_hub"""
     print(f"📥 Downloading {HF_REPO}...")
+    
+    # Clean up any existing partial download
+    if os.path.exists(model_path):
+        print(f"🗑️ Removing incomplete model at {model_path}")
+        shutil.rmtree(model_path, ignore_errors=True)
     
     cache_dir = os.path.join(os.path.dirname(model_path), "hf_cache")
     os.makedirs(cache_dir, exist_ok=True)
@@ -170,12 +224,16 @@ def load_model():
     base_path = find_best_path()
     model_path = os.path.join(base_path, "models", "LTX-2")
     
-    # Download model if needed
-    config_path = os.path.join(model_path, "model_index.json")
-    if not os.path.exists(config_path):
-        download_model(model_path)
+    # Check if model exists AND is valid
+    if os.path.exists(model_path):
+        if is_model_valid(model_path):
+            print(f"✅ Model cached at {model_path}")
+        else:
+            print(f"⚠️ Model corrupted, re-downloading...")
+            shutil.rmtree(model_path, ignore_errors=True)
+            download_model(model_path)
     else:
-        print(f"✅ Model cached at {model_path}")
+        download_model(model_path)
     
     # Clear memory before loading
     clear_memory()
