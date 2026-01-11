@@ -1,4 +1,4 @@
-VERSION = "5.9.0-NO-WARMUP"
+VERSION = "5.10.0-80GB"
 
 import os
 import sys
@@ -251,9 +251,9 @@ def load_model():
     )
     print("✅ Loaded LTX2Pipeline")
     
-    # Use sequential CPU offload for maximum memory savings
-    pipe.enable_sequential_cpu_offload()
-    print("✅ Sequential CPU offload enabled!")
+    # Use model CPU offload (faster than sequential, needs more VRAM)
+    pipe.enable_model_cpu_offload()
+    print("✅ Model CPU offload enabled!")
     
     # Clear memory after loading
     clear_memory()
