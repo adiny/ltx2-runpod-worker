@@ -1,7 +1,8 @@
-VERSION = "5.6.0-CPU-OFFLOAD"
+VERSION = "5.7.0-OPTIMIZED"
 
 import os
 import sys
+import gc
 import torch
 import runpod
 import base64
@@ -12,19 +13,51 @@ import soundfile as sf
 import requests
 import shutil
 
-# Disable XET
+# Disable XET and optimize memory
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:512"
 
 pipe = None
 HF_REPO = "Lightricks/LTX-2"
 
+# Use persistent volume path
+VOLUME_PATH = "/runpod-volume"
+MODEL_PATH = os.path.join(VOLUME_PATH, "models", "LTX-2")
+
+
+def get_memory_info():
+    """Get current memory usage"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        return {"allocated_gb": round(allocated, 2), "reserved_gb": round(reserved, 2), "total_gb": round(total, 2)}
+    return {}
+
+
+def clear_memory():
+    """Aggressive memory cleanup"""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
 
 def find_best_path():
-    """Find path with most free space"""
-    paths_to_try = ["/runpod-volume", "/workspace", "/root", "/tmp"]
+    """Find path with most free space - prefer volume"""
+    # Always prefer runpod-volume if it exists
+    if os.path.exists(VOLUME_PATH):
+        try:
+            total, used, free = shutil.disk_usage(VOLUME_PATH)
+            free_gb = free // (1024**3)
+            print(f"💾 Using volume: {VOLUME_PATH} ({free_gb}GB free)")
+            return VOLUME_PATH
+        except:
+            pass
     
+    # Fallback to other paths
+    paths_to_try = ["/workspace", "/root", "/tmp"]
     best_path = "/root"
     best_free = 0
     
@@ -124,6 +157,7 @@ def load_model():
     print(f"🚀 Version: {VERSION}")
     print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
     print(f"PyTorch: {torch.__version__}")
+    print(f"Memory: {get_memory_info()}")
     
     # Check accelerate
     try:
@@ -132,9 +166,9 @@ def load_model():
     except ImportError:
         print("⚠️ accelerate not found!")
     
-    # Find best path
+    # Find best path - prefer volume
     base_path = find_best_path()
-    model_path = os.path.join(base_path, "LTX-2")
+    model_path = os.path.join(base_path, "models", "LTX-2")
     
     # Download model if needed
     config_path = os.path.join(model_path, "model_index.json")
@@ -142,6 +176,10 @@ def load_model():
         download_model(model_path)
     else:
         print(f"✅ Model cached at {model_path}")
+    
+    # Clear memory before loading
+    clear_memory()
+    print(f"Memory before load: {get_memory_info()}")
     
     print("⏳ Loading pipeline...")
     
@@ -159,7 +197,38 @@ def load_model():
     pipe.enable_model_cpu_offload()
     print("✅ CPU offload enabled!")
     
+    # Clear memory after loading
+    clear_memory()
+    print(f"Memory after load: {get_memory_info()}")
+    
     return pipe
+
+
+def warmup_model():
+    """Run a tiny inference to warm up the model"""
+    global pipe
+    
+    print("🔥 Warming up model...")
+    start = time.time()
+    
+    try:
+        with torch.inference_mode():
+            # Minimal generation just to initialize CUDA kernels
+            _ = pipe(
+                prompt="test",
+                negative_prompt="",
+                width=256,
+                height=256,
+                num_frames=9,  # Minimum frames
+                num_inference_steps=1,  # Single step
+                output_type="pt"
+            )
+        clear_memory()
+        print(f"✅ Warmup complete in {time.time() - start:.1f}s")
+        print(f"Memory after warmup: {get_memory_info()}")
+    except Exception as e:
+        print(f"⚠️ Warmup failed (non-critical): {e}")
+        clear_memory()
 
 
 def handler(event):
@@ -190,9 +259,13 @@ def handler(event):
 
         pipeline = load_model()
         
+        # Memory check before generation
+        mem_info = get_memory_info()
         print(f"🎬 {prompt[:50]}... ({width}x{height}, {num_frames}f)")
+        print(f"Memory: {mem_info}")
         
-        torch.cuda.empty_cache()
+        # Clear before generation
+        clear_memory()
         
         start = time.time()
         with torch.inference_mode():
@@ -219,18 +292,20 @@ def handler(event):
         with open(out_path, "rb") as f:
             video_b64 = base64.b64encode(f.read()).decode()
         
-        torch.cuda.empty_cache()
+        # Clear after generation
+        clear_memory()
         
         return {
             "video_base64": video_b64,
             "generation_time": round(gen_time, 2),
-            "frames": num_frames
+            "frames": num_frames,
+            "memory": get_memory_info()
         }
 
     except Exception as e:
         import traceback
         print(f"❌ {e}\n{traceback.format_exc()}")
-        torch.cuda.empty_cache()
+        clear_memory()
         return {"error": str(e)}
     finally:
         for f in temp_files:
@@ -238,5 +313,21 @@ def handler(event):
                 os.remove(f)
 
 
+# === PRE-WARMING ON STARTUP ===
 if __name__ == "__main__":
+    print("=" * 50)
+    print(f"🚀 LTX-2 Worker {VERSION}")
+    print("=" * 50)
+    
+    # Load model at startup (before any jobs arrive)
+    load_model()
+    
+    # Warm up with minimal inference
+    warmup_model()
+    
+    print("=" * 50)
+    print("✅ Worker ready to accept jobs!")
+    print("=" * 50)
+    
+    # Start the serverless handler
     runpod.serverless.start({"handler": handler})
