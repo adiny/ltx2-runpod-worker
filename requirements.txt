@@ -4,7 +4,9 @@ transformers>=4.46.0
 accelerate>=1.0.0
 sentencepiece
 soundfile
+imageio
 imageio-ffmpeg
+opencv-python-headless
 huggingface_hub
 numpy
 pillow
