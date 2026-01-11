@@ -1,4 +1,4 @@
-VERSION = "5.11.0-80GB"
+VERSION = "5.12.0-80GB"
 
 import os
 import sys
@@ -179,8 +179,8 @@ def save_final_output(video_frames, input_audio_path, generated_audio_waveform, 
     
     # Convert frames to proper format if needed
     if torch.is_tensor(video_frames):
-        # Convert from tensor to numpy
-        video_frames = video_frames.cpu().numpy()
+        # Convert bfloat16 to float32 first (numpy doesn't support bfloat16)
+        video_frames = video_frames.cpu().float().numpy()
     
     # If frames are in format (frames, channels, height, width), convert to (frames, height, width, channels)
     if isinstance(video_frames, np.ndarray) and video_frames.ndim == 4:
