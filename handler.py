@@ -1,4 +1,4 @@
-VERSION = "5.12.0-80GB"
+VERSION = "5.13.0-FAST"
 
 import os
 import sys
@@ -265,9 +265,9 @@ def load_model():
     )
     print("✅ Loaded LTX2Pipeline")
     
-    # Use model CPU offload (faster than sequential, needs more VRAM)
-    pipe.enable_model_cpu_offload()
-    print("✅ Model CPU offload enabled!")
+    # Load directly to GPU (no CPU offload for speed)
+    pipe = pipe.to("cuda")
+    print("✅ Loaded to GPU!")
     
     # Clear memory after loading
     clear_memory()
@@ -341,7 +341,7 @@ def handler(event):
                 width=width,
                 height=height,
                 num_frames=num_frames,
-                num_inference_steps=job_input.get("num_inference_steps", 25),
+                num_inference_steps=job_input.get("num_inference_steps", 15),
                 output_type="pt"
             )
         gen_time = time.time() - start
