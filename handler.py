@@ -44,20 +44,27 @@ def clear_memory():
 
 
 def find_best_path():
-    """Find the best path for model storage"""
-    paths = [VOLUME_PATH, "/workspace", "/root", "/tmp"]
+    """Find the best path for model storage - prefer /workspace to avoid quota issues"""
+    # Try /workspace first (no quota issues), then volume, then others
+    paths = ["/workspace", "/root", VOLUME_PATH, "/tmp"]
     for path in paths:
         if os.path.exists(path):
             try:
+                # Test if we can actually write
+                test_file = os.path.join(path, ".write_test")
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+                
                 stat = os.statvfs(path)
                 free = stat.f_bavail * stat.f_frsize
                 free_gb = free // (1024**3)
-                print(f"💾 Checking {path}: {free_gb}GB free")
-                if free_gb > 50:  # Need at least 50GB
-                    print(f"✅ Using volume: {path}")
+                print(f"💾 Checking {path}: {free_gb}GB free, writable: ✅")
+                if free_gb > 50:
+                    print(f"✅ Using: {path}")
                     return path
             except Exception as e:
-                print(f"⚠️ Error checking {path}: {e}")
+                print(f"⚠️ {path}: not writable ({e})")
     print("⚠️ Using /tmp as fallback")
     return "/tmp"
 
