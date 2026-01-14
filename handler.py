@@ -1,4 +1,4 @@
-VERSION = "5.13.0-FAST"
+VERSION = "5.14.0-FAST"
 
 import os
 import sys
@@ -83,10 +83,12 @@ def is_model_valid(model_path):
         "model_index.json",
         "scheduler/scheduler_config.json",
         "text_encoder/config.json",
-        "tokenizer/tokenizer.model",
         "transformer/config.json",
         "vae/config.json",
     ]
+    
+    # Tokenizer can be either tokenizer.model OR tokenizer_config.json (depends on version)
+    tokenizer_files = ["tokenizer/tokenizer.model", "tokenizer/tokenizer_config.json"]
     
     # Check for at least one safetensors file in key directories
     safetensor_dirs = ["text_encoder", "transformer", "vae"]
@@ -102,6 +104,16 @@ def is_model_valid(model_path):
         if os.path.getsize(full_path) == 0:
             print(f"   ❌ Empty file: {f}")
             return False
+    
+    # Check tokenizer - at least one file must exist
+    tokenizer_found = False
+    for tf in tokenizer_files:
+        if os.path.exists(os.path.join(model_path, tf)):
+            tokenizer_found = True
+            break
+    if not tokenizer_found:
+        print(f"   ❌ Missing tokenizer files")
+        return False
     
     for dir_name in safetensor_dirs:
         dir_path = os.path.join(model_path, dir_name)
