@@ -1,4 +1,4 @@
-VERSION = "5.14.0-FAST"
+VERSION = "5.15.0-STABLE"
 
 import os
 import sys
@@ -99,10 +99,15 @@ def is_model_valid(model_path):
         full_path = os.path.join(model_path, f)
         if not os.path.exists(full_path):
             print(f"   ❌ Missing: {f}")
+            # Auto-cleanup corrupted model
+            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
+            shutil.rmtree(model_path, ignore_errors=True)
             return False
         # Check file is not empty
         if os.path.getsize(full_path) == 0:
             print(f"   ❌ Empty file: {f}")
+            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
+            shutil.rmtree(model_path, ignore_errors=True)
             return False
     
     # Check tokenizer - at least one file must exist
@@ -113,18 +118,24 @@ def is_model_valid(model_path):
             break
     if not tokenizer_found:
         print(f"   ❌ Missing tokenizer files")
+        print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
+        shutil.rmtree(model_path, ignore_errors=True)
         return False
     
     for dir_name in safetensor_dirs:
         dir_path = os.path.join(model_path, dir_name)
         if not os.path.exists(dir_path):
             print(f"   ❌ Missing directory: {dir_name}")
+            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
+            shutil.rmtree(model_path, ignore_errors=True)
             return False
         
         # Check for safetensors files
         safetensor_files = [f for f in os.listdir(dir_path) if f.endswith('.safetensors')]
         if not safetensor_files:
             print(f"   ❌ No safetensors in: {dir_name}")
+            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
+            shutil.rmtree(model_path, ignore_errors=True)
             return False
         
         # Check safetensors files are not empty/corrupted (at least 1KB)
@@ -132,6 +143,8 @@ def is_model_valid(model_path):
             sf_path = os.path.join(dir_path, sf_file)
             if os.path.getsize(sf_path) < 1024:
                 print(f"   ❌ Corrupted file: {dir_name}/{sf_file}")
+                print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
+                shutil.rmtree(model_path, ignore_errors=True)
                 return False
     
     print("   ✅ All model files valid")
@@ -142,12 +155,30 @@ def download_model(model_path):
     """Download model using huggingface_hub"""
     print(f"📥 Downloading {HF_REPO}...")
     
-    # Clean up any existing partial download
+    # CRITICAL: Clean up ANY existing files to prevent corruption
+    base_dir = os.path.dirname(model_path)
+    
+    # Remove model directory
     if os.path.exists(model_path):
-        print(f"🗑️ Removing incomplete model at {model_path}")
+        print(f"🗑️ Removing existing model at {model_path}")
         shutil.rmtree(model_path, ignore_errors=True)
     
-    cache_dir = os.path.join(os.path.dirname(model_path), "hf_cache")
+    # Remove all cache directories that might cause issues
+    cache_locations = [
+        os.path.join(base_dir, "hf_cache"),
+        os.path.join(base_dir, ".cache"),
+        os.path.join(model_path, ".cache"),
+        "/root/.cache/huggingface",
+        "/tmp/huggingface",
+    ]
+    
+    for cache_dir in cache_locations:
+        if os.path.exists(cache_dir):
+            print(f"🗑️ Cleaning cache: {cache_dir}")
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    
+    # Create fresh directories
+    cache_dir = os.path.join(base_dir, "hf_cache")
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(model_path, exist_ok=True)
     
@@ -156,15 +187,23 @@ def download_model(model_path):
     
     from huggingface_hub import snapshot_download
     
-    snapshot_download(
-        repo_id=HF_REPO,
-        local_dir=model_path,
-        cache_dir=cache_dir,
-        ignore_patterns=["*.md", "*.git*", "*.mp4", "*fp4*", "*fp8*", "*distilled*", "*19b-dev.safetensors"],
-        max_workers=2,
-    )
+    try:
+        snapshot_download(
+            repo_id=HF_REPO,
+            local_dir=model_path,
+            cache_dir=cache_dir,
+            ignore_patterns=["*.md", "*.git*", "*.mp4", "*fp4*", "*fp8*", "*distilled*", "*19b-dev.safetensors"],
+            max_workers=2,
+            resume_download=False,  # Don't resume - start fresh
+        )
+    except Exception as e:
+        print(f"❌ Download failed: {e}")
+        # Clean up on failure
+        shutil.rmtree(model_path, ignore_errors=True)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        raise
     
-    # Clean cache
+    # Clean cache after successful download
     shutil.rmtree(cache_dir, ignore_errors=True)
     print("✅ Download complete!")
 
@@ -255,11 +294,15 @@ def load_model():
         if is_model_valid(model_path):
             print(f"✅ Model cached at {model_path}")
         else:
-            print(f"⚠️ Model corrupted, re-downloading...")
-            shutil.rmtree(model_path, ignore_errors=True)
+            # is_model_valid already cleaned up if invalid
+            print(f"📥 Starting fresh download...")
             download_model(model_path)
     else:
         download_model(model_path)
+    
+    # Final validation before loading
+    if not is_model_valid(model_path):
+        raise RuntimeError(f"Model at {model_path} is still invalid after download!")
     
     # Clear memory before loading
     clear_memory()
