@@ -12,6 +12,7 @@ import subprocess
 import soundfile as sf
 import requests
 import shutil
+import fcntl  # For file locking
 
 # Disable XET and optimize memory
 os.environ["HF_HUB_DISABLE_XET"] = "1"
@@ -24,6 +25,8 @@ HF_REPO = "Lightricks/LTX-2"
 # Use persistent volume path
 VOLUME_PATH = "/runpod-volume"
 MODEL_PATH = os.path.join(VOLUME_PATH, "models", "LTX-2")
+LOCK_FILE = os.path.join(VOLUME_PATH, "models", ".ltx2_download.lock")
+DOWNLOAD_TIMEOUT = 900  # 15 minutes - max time to wait for another worker's download
 
 
 def get_memory_info():
@@ -211,13 +214,80 @@ def download_model(model_path, force_fresh=False):
     print("✅ Download complete!")
 
 
+def acquire_download_lock():
+    """
+    Acquire exclusive lock for downloading.
+    Returns lock file handle if acquired, None if another worker is downloading.
+    """
+    os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    
+    try:
+        lock_fd = open(LOCK_FILE, 'w')
+        # Try to acquire exclusive lock (non-blocking)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Write our PID and timestamp
+        lock_fd.write(f"{os.getpid()}:{time.time()}")
+        lock_fd.flush()
+        print(f"🔒 Acquired download lock (PID: {os.getpid()})")
+        return lock_fd
+    except (IOError, OSError):
+        # Another process has the lock
+        return None
+
+
+def release_download_lock(lock_fd):
+    """Release the download lock"""
+    if lock_fd:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+            print("🔓 Released download lock")
+        except:
+            pass
+
+
+def wait_for_download_completion(model_path, timeout=DOWNLOAD_TIMEOUT):
+    """
+    Wait for another worker to complete the download.
+    Returns True if model becomes valid, False if timeout.
+    """
+    print(f"⏳ Another worker is downloading. Waiting up to {timeout}s...")
+    start_time = time.time()
+    check_interval = 10  # Check every 10 seconds
+    
+    while time.time() - start_time < timeout:
+        time.sleep(check_interval)
+        
+        # Check if model is now valid
+        is_valid, status = is_model_valid(model_path)
+        if is_valid:
+            print("✅ Model ready (downloaded by another worker)")
+            return True
+        
+        # Check if lock is still held
+        try:
+            with open(LOCK_FILE, 'r') as f:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(f, fcntl.LOCK_UN)
+                # Lock was released - other worker finished (or crashed)
+                print("🔓 Download lock released by other worker")
+                break
+        except (IOError, OSError):
+            # Lock still held - download in progress
+            elapsed = int(time.time() - start_time)
+            print(f"   ... still waiting ({elapsed}s)")
+            continue
+    
+    return False
+
+
 def ensure_model_ready(model_path):
     """
-    Smart model preparation:
+    Smart model preparation with file locking to prevent race conditions:
     1. If valid -> use it
-    2. If incomplete -> resume download
-    3. If corrupted -> fresh download
-    4. If not found -> fresh download
+    2. If another worker is downloading -> wait
+    3. If incomplete -> acquire lock and resume download
+    4. If corrupted -> acquire lock and fresh download
     """
     is_valid, status = is_model_valid(model_path)
     
@@ -225,22 +295,49 @@ def ensure_model_ready(model_path):
         print(f"✅ Model cached and valid at {model_path}")
         return True
     
-    if status == "corrupted":
-        print("⚠️ Corruption detected - starting fresh download...")
-        download_model(model_path, force_fresh=True)
-    elif status == "incomplete":
-        print("📥 Incomplete model - resuming download...")
-        download_model(model_path, force_fresh=False)  # Resume!
-    else:  # not_found
-        print("📥 Model not found - starting download...")
-        download_model(model_path, force_fresh=False)
+    # Try to acquire download lock
+    lock_fd = acquire_download_lock()
     
-    # Final validation
-    is_valid, status = is_model_valid(model_path)
-    if not is_valid:
-        raise RuntimeError(f"Model at {model_path} still invalid after download! Status: {status}")
+    if lock_fd is None:
+        # Another worker is downloading - wait for it
+        if wait_for_download_completion(model_path):
+            return True
+        
+        # Timeout or other worker failed - try to acquire lock ourselves
+        lock_fd = acquire_download_lock()
+        if lock_fd is None:
+            # Still can't get lock - re-validate and wait more
+            is_valid, _ = is_model_valid(model_path)
+            if is_valid:
+                return True
+            raise RuntimeError("Cannot acquire download lock and model is not ready")
     
-    return True
+    try:
+        # We have the lock - re-validate (might have changed while waiting)
+        is_valid, status = is_model_valid(model_path)
+        if is_valid:
+            print(f"✅ Model became valid while waiting for lock")
+            return True
+        
+        if status == "corrupted":
+            print("⚠️ Corruption detected - starting fresh download...")
+            download_model(model_path, force_fresh=True)
+        elif status == "incomplete":
+            print("📥 Incomplete model - resuming download...")
+            download_model(model_path, force_fresh=False)  # Resume!
+        else:  # not_found
+            print("📥 Model not found - starting download...")
+            download_model(model_path, force_fresh=False)
+        
+        # Final validation
+        is_valid, status = is_model_valid(model_path)
+        if not is_valid:
+            raise RuntimeError(f"Model at {model_path} still invalid after download! Status: {status}")
+        
+        return True
+    
+    finally:
+        release_download_lock(lock_fd)
 
 
 def get_audio_duration(file_path):
