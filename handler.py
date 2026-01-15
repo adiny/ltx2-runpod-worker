@@ -1,4 +1,4 @@
-VERSION = "5.15.0-STABLE"
+VERSION = "5.16.0-STABLE"  # Bumped version for fix
 
 import os
 import sys
@@ -77,8 +77,11 @@ def find_best_path():
     return best_path
 
 
-def is_model_valid(model_path):
-    """Check if model files are complete and valid"""
+def get_missing_files(model_path):
+    """
+    Check which files are missing WITHOUT deleting anything.
+    Returns tuple: (missing_required, missing_safetensors, has_corruption)
+    """
     required_files = [
         "model_index.json",
         "scheduler/scheduler_config.json",
@@ -87,98 +90,98 @@ def is_model_valid(model_path):
         "vae/config.json",
     ]
     
-    # Tokenizer can be either tokenizer.model OR tokenizer_config.json (depends on version)
     tokenizer_files = ["tokenizer/tokenizer.model", "tokenizer/tokenizer_config.json"]
-    
-    # Check for at least one safetensors file in key directories
     safetensor_dirs = ["text_encoder", "transformer", "vae"]
     
-    print("🔍 Validating model files...")
+    missing_required = []
+    missing_safetensors = []
+    has_corruption = False
     
+    # Check required config files
     for f in required_files:
         full_path = os.path.join(model_path, f)
         if not os.path.exists(full_path):
-            print(f"   ❌ Missing: {f}")
-            # Auto-cleanup corrupted model
-            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
-            shutil.rmtree(model_path, ignore_errors=True)
-            return False
-        # Check file is not empty
-        if os.path.getsize(full_path) == 0:
-            print(f"   ❌ Empty file: {f}")
-            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
-            shutil.rmtree(model_path, ignore_errors=True)
-            return False
+            missing_required.append(f)
+        elif os.path.getsize(full_path) == 0:
+            # Empty file = corruption
+            print(f"   ⚠️ Empty/corrupted: {f}")
+            has_corruption = True
     
-    # Check tokenizer - at least one file must exist
-    tokenizer_found = False
-    for tf in tokenizer_files:
-        if os.path.exists(os.path.join(model_path, tf)):
-            tokenizer_found = True
-            break
+    # Check tokenizer
+    tokenizer_found = any(
+        os.path.exists(os.path.join(model_path, tf)) 
+        for tf in tokenizer_files
+    )
     if not tokenizer_found:
-        print(f"   ❌ Missing tokenizer files")
-        print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
-        shutil.rmtree(model_path, ignore_errors=True)
-        return False
+        missing_required.append("tokenizer/*")
     
+    # Check safetensors
     for dir_name in safetensor_dirs:
         dir_path = os.path.join(model_path, dir_name)
         if not os.path.exists(dir_path):
-            print(f"   ❌ Missing directory: {dir_name}")
-            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
-            shutil.rmtree(model_path, ignore_errors=True)
-            return False
+            missing_safetensors.append(f"{dir_name}/*.safetensors")
+            continue
         
-        # Check for safetensors files
         safetensor_files = [f for f in os.listdir(dir_path) if f.endswith('.safetensors')]
         if not safetensor_files:
-            print(f"   ❌ No safetensors in: {dir_name}")
-            print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
-            shutil.rmtree(model_path, ignore_errors=True)
-            return False
+            missing_safetensors.append(f"{dir_name}/*.safetensors")
+            continue
         
-        # Check safetensors files are not empty/corrupted (at least 1KB)
+        # Check for corrupted safetensors (< 1KB = definitely bad)
         for sf_file in safetensor_files:
             sf_path = os.path.join(dir_path, sf_file)
             if os.path.getsize(sf_path) < 1024:
-                print(f"   ❌ Corrupted file: {dir_name}/{sf_file}")
-                print(f"🗑️ Auto-cleaning corrupted model at {model_path}...")
-                shutil.rmtree(model_path, ignore_errors=True)
-                return False
+                print(f"   ⚠️ Corrupted safetensor: {dir_name}/{sf_file}")
+                has_corruption = True
+    
+    return missing_required, missing_safetensors, has_corruption
+
+
+def is_model_valid(model_path):
+    """
+    Check if model files are complete and valid.
+    DOES NOT DELETE anything - just reports status.
+    """
+    if not os.path.exists(model_path):
+        return False, "not_found"
+    
+    print("🔍 Validating model files...")
+    missing_required, missing_safetensors, has_corruption = get_missing_files(model_path)
+    
+    if has_corruption:
+        print("   ❌ Corruption detected")
+        return False, "corrupted"
+    
+    if missing_required:
+        print(f"   ❌ Missing required: {missing_required}")
+        return False, "incomplete"
+    
+    if missing_safetensors:
+        print(f"   ❌ Missing safetensors: {missing_safetensors}")
+        return False, "incomplete"
     
     print("   ✅ All model files valid")
-    return True
+    return True, "valid"
 
 
-def download_model(model_path):
-    """Download model using huggingface_hub"""
+def download_model(model_path, force_fresh=False):
+    """
+    Download model using huggingface_hub.
+    Supports resuming partial downloads unless force_fresh=True.
+    """
     print(f"📥 Downloading {HF_REPO}...")
     
-    # CRITICAL: Clean up ANY existing files to prevent corruption
     base_dir = os.path.dirname(model_path)
+    cache_dir = os.path.join(base_dir, "hf_cache")
     
-    # Remove model directory
-    if os.path.exists(model_path):
-        print(f"🗑️ Removing existing model at {model_path}")
-        shutil.rmtree(model_path, ignore_errors=True)
-    
-    # Remove all cache directories that might cause issues
-    cache_locations = [
-        os.path.join(base_dir, "hf_cache"),
-        os.path.join(base_dir, ".cache"),
-        os.path.join(model_path, ".cache"),
-        "/root/.cache/huggingface",
-        "/tmp/huggingface",
-    ]
-    
-    for cache_dir in cache_locations:
+    if force_fresh:
+        print("🗑️ Force fresh download - cleaning everything...")
+        if os.path.exists(model_path):
+            shutil.rmtree(model_path, ignore_errors=True)
         if os.path.exists(cache_dir):
-            print(f"🗑️ Cleaning cache: {cache_dir}")
             shutil.rmtree(cache_dir, ignore_errors=True)
     
-    # Create fresh directories
-    cache_dir = os.path.join(base_dir, "hf_cache")
+    # Create directories
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(model_path, exist_ok=True)
     
@@ -194,18 +197,50 @@ def download_model(model_path):
             cache_dir=cache_dir,
             ignore_patterns=["*.md", "*.git*", "*.mp4", "*fp4*", "*fp8*", "*distilled*", "*19b-dev.safetensors"],
             max_workers=2,
-            resume_download=False,  # Don't resume - start fresh
+            resume_download=True,  # ✅ CRITICAL: Resume partial downloads!
         )
     except Exception as e:
         print(f"❌ Download failed: {e}")
-        # Clean up on failure
-        shutil.rmtree(model_path, ignore_errors=True)
-        shutil.rmtree(cache_dir, ignore_errors=True)
+        # DON'T delete on failure - let it resume next time
         raise
     
-    # Clean cache after successful download
-    shutil.rmtree(cache_dir, ignore_errors=True)
+    # Clean cache after successful download (keep model files)
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    
     print("✅ Download complete!")
+
+
+def ensure_model_ready(model_path):
+    """
+    Smart model preparation:
+    1. If valid -> use it
+    2. If incomplete -> resume download
+    3. If corrupted -> fresh download
+    4. If not found -> fresh download
+    """
+    is_valid, status = is_model_valid(model_path)
+    
+    if is_valid:
+        print(f"✅ Model cached and valid at {model_path}")
+        return True
+    
+    if status == "corrupted":
+        print("⚠️ Corruption detected - starting fresh download...")
+        download_model(model_path, force_fresh=True)
+    elif status == "incomplete":
+        print("📥 Incomplete model - resuming download...")
+        download_model(model_path, force_fresh=False)  # Resume!
+    else:  # not_found
+        print("📥 Model not found - starting download...")
+        download_model(model_path, force_fresh=False)
+    
+    # Final validation
+    is_valid, status = is_model_valid(model_path)
+    if not is_valid:
+        raise RuntimeError(f"Model at {model_path} still invalid after download! Status: {status}")
+    
+    return True
 
 
 def get_audio_duration(file_path):
@@ -289,20 +324,8 @@ def load_model():
     base_path = find_best_path()
     model_path = os.path.join(base_path, "models", "LTX-2")
     
-    # Check if model exists AND is valid
-    if os.path.exists(model_path):
-        if is_model_valid(model_path):
-            print(f"✅ Model cached at {model_path}")
-        else:
-            # is_model_valid already cleaned up if invalid
-            print(f"📥 Starting fresh download...")
-            download_model(model_path)
-    else:
-        download_model(model_path)
-    
-    # Final validation before loading
-    if not is_model_valid(model_path):
-        raise RuntimeError(f"Model at {model_path} is still invalid after download!")
+    # Smart model preparation (validates, resumes, or downloads as needed)
+    ensure_model_ready(model_path)
     
     # Clear memory before loading
     clear_memory()
