@@ -1,4 +1,4 @@
-VERSION = "5.16.0-STABLE"  # Bumped version for fix
+VERSION = "5.17.0-FAST"  # Fast loading optimizations
 
 import os
 import sys
@@ -428,21 +428,38 @@ def load_model():
     clear_memory()
     print(f"Memory before load: {get_memory_info()}")
     
-    print("⏳ Loading pipeline...")
+    # ============================================
+    # FAST LOADING OPTIMIZATIONS
+    # ============================================
+    
+    # Enable TF32 for faster matrix operations on Ampere+ GPUs (A100, H100)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Set matmul precision for speed
+    torch.set_float32_matmul_precision('medium')
+    
+    # Pre-set CUDA device
+    torch.cuda.set_device(0)
+    
+    print("⏳ Loading pipeline (optimized)...")
+    load_start = time.time()
     
     from diffusers import LTX2Pipeline
     
+    # FAST LOADING: Load directly to GPU with device_map
+    # This avoids CPU→GPU transfer which is slow for 13B params
     pipe = LTX2Pipeline.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
         use_safetensors=True,
-        local_files_only=True
+        local_files_only=True,
+        device_map="balanced",        # Load directly to GPU(s)
+        low_cpu_mem_usage=True,       # Reduce RAM usage during load
     )
-    print("✅ Loaded LTX2Pipeline")
     
-    # Load directly to GPU (no CPU offload for speed)
-    pipe = pipe.to("cuda")
-    print("✅ Loaded to GPU!")
+    load_time = time.time() - load_start
+    print(f"✅ Loaded LTX2Pipeline in {load_time:.1f}s")
     
     # Clear memory after loading
     clear_memory()
